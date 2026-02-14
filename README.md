@@ -118,3 +118,7 @@ Notes:
 
 - Peak RSS was collected with `/usr/bin/time -lp`.
 - These are example results, not universal guarantees.
+
+## Author
+
+Anton Holmgren

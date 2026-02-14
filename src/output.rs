@@ -127,7 +127,7 @@ fn write_header(
     };
 
     writeln!(w, "# v{}", VERSION).map_err(|e| e.to_string())?;
-    writeln!(w, "# ./Infomap {}", cfg.raw_args).map_err(|e| e.to_string())?;
+    writeln!(w, "# minimap {}", cfg.raw_args).map_err(|e| e.to_string())?;
     writeln!(w, "# started at {}", started).map_err(|e| e.to_string())?;
     writeln!(w, "# completed in {} s", elapsed.as_secs_f64()).map_err(|e| e.to_string())?;
     writeln!(w, "# partitioned into 2 levels with {} top modules", top_modules)
