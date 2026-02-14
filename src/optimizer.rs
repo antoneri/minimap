@@ -1,6 +1,7 @@
 use crate::graph::{FlowData, Graph};
 use crate::objective::{DeltaFlow, MapEquationObjective, plogp};
 use crate::rng_compat::Mt19937;
+use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
 const CORE_LOOP_LIMIT: usize = 10;
@@ -804,21 +805,50 @@ fn single_trial(graph: &Graph, rng: &mut Mt19937, directed: bool) -> TrialResult
     }
 }
 
-pub fn run_trials(graph: &Graph, seed: u32, num_trials: u32, directed: bool) -> TrialResult {
-    let mut rng = Mt19937::new(seed);
-    let mut best: Option<TrialResult> = None;
+#[inline]
+fn seed_for_trial(base_seed: u32, trial_index: u32) -> u32 {
+    if trial_index == 0 {
+        return base_seed;
+    }
 
-    for _ in 0..num_trials.max(1) {
-        let trial = single_trial(graph, &mut rng, directed);
-        match &best {
-            None => best = Some(trial),
-            Some(current_best) => {
-                if trial.codelength < current_best.codelength - MIN_CODELENGTH_IMPROVEMENT {
-                    best = Some(trial);
-                }
-            }
+    // SplitMix64-style mixing for deterministic independent trial seeds.
+    let mut z = (base_seed as u64) ^ ((trial_index as u64).wrapping_add(0x9E37_79B9_7F4A_7C15));
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    (z ^ (z >> 31)) as u32
+}
+
+pub fn run_trials(graph: &Graph, seed: u32, num_trials: u32, directed: bool) -> TrialResult {
+    let trials = num_trials.max(1);
+
+    if trials == 1 {
+        let mut rng = Mt19937::new(seed);
+        return single_trial(graph, &mut rng, directed);
+    }
+
+    let mut trial_results: Vec<(u32, TrialResult)> = (0..trials)
+        .into_par_iter()
+        .map(|trial_index| {
+            let mut rng = Mt19937::new(seed_for_trial(seed, trial_index));
+            let trial = single_trial(graph, &mut rng, directed);
+            (trial_index, trial)
+        })
+        .collect();
+
+    // Deterministic best-trial selection independent of worker scheduling.
+    trial_results.sort_unstable_by_key(|(trial_index, _)| *trial_index);
+
+    let mut best = trial_results
+        .drain(..1)
+        .next()
+        .expect("at least one trial")
+        .1;
+
+    for (_, trial) in trial_results {
+        if trial.codelength < best.codelength - MIN_CODELENGTH_IMPROVEMENT {
+            best = trial;
         }
     }
 
-    best.expect("at least one trial")
+    best
 }
