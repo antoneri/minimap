@@ -34,6 +34,7 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
     let mut seed = 123u32;
     let mut num_trials = 1u32;
     let mut trial_threads: Option<usize> = None;
+    let mut parity_rng = false;
     let mut silent = false;
     let mut print_tree = false;
     let mut print_clu = false;
@@ -125,6 +126,10 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
                 } else {
                     i += 1;
                 }
+            }
+            "--parity-rng" => {
+                parity_rng = true;
+                i += 1;
             }
             "--tree" => {
                 print_tree = true;
@@ -220,6 +225,7 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
         seed,
         num_trials,
         trial_threads,
+        parity_rng,
         silent,
         print_tree,
         print_clu,

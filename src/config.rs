@@ -10,6 +10,7 @@ pub struct Config {
     pub seed: u32,
     pub num_trials: u32,
     pub trial_threads: Option<usize>,
+    pub parity_rng: bool,
     pub silent: bool,
     pub print_tree: bool,
     pub print_clu: bool,

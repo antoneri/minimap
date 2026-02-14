@@ -26,6 +26,7 @@ fn run() -> Result<(), String> {
         cfg.num_trials,
         cfg.directed,
         cfg.trial_threads,
+        cfg.parity_rng,
     );
 
     let elapsed = start.elapsed();

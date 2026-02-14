@@ -1,3 +1,10 @@
+use rand::rngs::SmallRng;
+use rand::{Rng, SeedableRng};
+
+pub trait TrialRng {
+    fn randomized_index_vector(&mut self, out: &mut [u32]);
+}
+
 #[derive(Debug, Clone)]
 pub struct Mt19937 {
     mt: [u32; 624],
@@ -100,6 +107,38 @@ impl Mt19937 {
         let size = out.len();
         for i in 0..size {
             let j = i + self.rand_int_inclusive(0, (size - i - 1) as u32) as usize;
+            out.swap(i, j);
+        }
+    }
+}
+
+impl TrialRng for Mt19937 {
+    fn randomized_index_vector(&mut self, out: &mut [u32]) {
+        Mt19937::randomized_index_vector(self, out);
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RustRng {
+    rng: SmallRng,
+}
+
+impl RustRng {
+    pub fn new(seed: u32) -> Self {
+        Self {
+            rng: SmallRng::seed_from_u64(seed as u64),
+        }
+    }
+}
+
+impl TrialRng for RustRng {
+    fn randomized_index_vector(&mut self, out: &mut [u32]) {
+        for (i, slot) in out.iter_mut().enumerate() {
+            *slot = i as u32;
+        }
+        let size = out.len();
+        for i in 0..size {
+            let j = self.rng.gen_range(i..size);
             out.swap(i, j);
         }
     }

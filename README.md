@@ -54,6 +54,7 @@ Supported options (v1):
 - `--seed <u32>`
 - `--num-trials <u32>`
 - `--threads <usize>` or `--threads=<usize>`
+- `--parity-rng` (use MT19937-compatible RNG for parity-focused runs)
 - `--tree`
 - `--clu`
 - `--ftree`
@@ -91,7 +92,8 @@ minimap modular_wd.net . --directed --two-level --output tree,clu,ftree --seed 1
 - Optimizer:
   - Two-level-only map equation optimization
   - Array-backed active network/module state
-  - Deterministic MT19937-compatible seeded trials
+  - Rust-native seeded RNG by default (`SmallRng`)
+  - MT19937-compatible seeded RNG when `--parity-rng` is set
   - Parallel trial evaluation with Rayon thread pool (`--threads`)
 - Writers:
   - Streaming `.tree`, `.clu`, `.ftree` output

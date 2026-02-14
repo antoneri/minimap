@@ -1,6 +1,6 @@
 use crate::graph::{FlowData, Graph};
 use crate::objective::{DeltaFlow, MapEquationObjective, plogp};
-use crate::rng_compat::Mt19937;
+use crate::rng_compat::{Mt19937, RustRng, TrialRng};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
@@ -240,7 +240,7 @@ fn move_node_to_predefined_module(
 
 fn try_move_each_node_into_best_module(
     active: &ActiveNetwork,
-    rng: &mut Mt19937,
+    rng: &mut impl TrialRng,
     objective: &mut MapEquationObjective,
     node_module: &mut [u32],
     module_data: &mut [FlowData],
@@ -477,7 +477,7 @@ fn try_move_each_node_into_best_module(
 
 fn optimize_active_network(
     active: &ActiveNetwork,
-    rng: &mut Mt19937,
+    rng: &mut impl TrialRng,
     objective: &mut MapEquationObjective,
     predefined_modules: Option<&[u32]>,
     lock_multi_module_nodes: bool,
@@ -572,7 +572,7 @@ fn partition_codelength(node_data: &[FlowData], objective: &mut MapEquationObjec
 fn find_top_modules_repeatedly_from_leaf(
     leaf_network: &ActiveNetwork,
     objective: &mut MapEquationObjective,
-    rng: &mut Mt19937,
+    rng: &mut impl TrialRng,
 ) -> ActiveNetwork {
     let mut have_modules = false;
     let mut active = leaf_network.clone();
@@ -613,7 +613,7 @@ fn find_top_modules_repeatedly_from_leaf(
 fn find_top_modules_repeatedly_from_modules(
     active_top: &ActiveNetwork,
     objective: &mut MapEquationObjective,
-    rng: &mut Mt19937,
+    rng: &mut impl TrialRng,
 ) -> ActiveNetwork {
     let mut active = active_top.clone();
     let mut consolidated_codelength = partition_codelength(
@@ -654,7 +654,7 @@ fn fine_tune(
     leaf_network: &ActiveNetwork,
     top_network: &mut ActiveNetwork,
     objective: &mut MapEquationObjective,
-    rng: &mut Mt19937,
+    rng: &mut impl TrialRng,
 ) -> u32 {
     if top_network.nodes.len() <= 1 {
         return 0;
@@ -740,7 +740,7 @@ fn one_level_codelength(graph: &Graph) -> f64 {
     sum
 }
 
-fn single_trial(graph: &Graph, rng: &mut Mt19937, directed: bool) -> TrialResult {
+fn single_trial(graph: &Graph, rng: &mut impl TrialRng, directed: bool) -> TrialResult {
     let node_data: Vec<FlowData> = graph.nodes.iter().map(|n| n.data).collect();
     let mut objective = MapEquationObjective::new(&node_data);
 
@@ -863,78 +863,109 @@ fn resolve_trial_threads(trials: u32, requested_threads: Option<usize>) -> usize
     threads.min(trials as usize).max(1)
 }
 
+fn collect_trials_with_rng<R: TrialRng + Send>(
+    graph: &Graph,
+    seed: u32,
+    trials: u32,
+    directed: bool,
+    worker_threads: usize,
+    make_rng: fn(u32) -> R,
+) -> Vec<(u32, TrialResult)> {
+    if worker_threads == 1 {
+        let mut out = Vec::with_capacity(trials as usize);
+        for trial_index in 0..trials {
+            let mut rng = make_rng(seed_for_trial(seed, trial_index));
+            let trial = single_trial(graph, &mut rng, directed);
+            out.push((trial_index, trial));
+        }
+        return out;
+    }
+
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(worker_threads)
+        .build()
+        .expect("failed to build trial thread pool");
+
+    if trace_threads_enabled() {
+        eprintln!(
+            "[trial-par] requested_threads={} pool_threads={} trials={}",
+            worker_threads,
+            pool.current_num_threads(),
+            trials
+        );
+        let with_threads: Vec<(u32, TrialResult, String)> = pool.install(|| {
+            (0..trials)
+                .into_par_iter()
+                .map(|trial_index| {
+                    let mut rng = make_rng(seed_for_trial(seed, trial_index));
+                    let trial = single_trial(graph, &mut rng, directed);
+                    let tid = format!("{:?}", std::thread::current().id());
+                    (trial_index, trial, tid)
+                })
+                .collect()
+        });
+
+        let mut unique_threads = std::collections::BTreeSet::new();
+        let mut out = Vec::with_capacity(with_threads.len());
+        for (trial_index, trial, tid) in with_threads {
+            unique_threads.insert(tid);
+            out.push((trial_index, trial));
+        }
+        eprintln!("[trial-par] used_worker_threads={}", unique_threads.len());
+        out
+    } else {
+        pool.install(|| {
+            (0..trials)
+                .into_par_iter()
+                .map(|trial_index| {
+                    let mut rng = make_rng(seed_for_trial(seed, trial_index));
+                    let trial = single_trial(graph, &mut rng, directed);
+                    (trial_index, trial)
+                })
+                .collect()
+        })
+    }
+}
+
 pub fn run_trials(
     graph: &Graph,
     seed: u32,
     num_trials: u32,
     directed: bool,
     requested_threads: Option<usize>,
+    parity_rng: bool,
 ) -> TrialResult {
     let trials = num_trials.max(1);
 
     if trials == 1 {
-        let mut rng = Mt19937::new(seed);
+        if parity_rng {
+            let mut rng = Mt19937::new(seed);
+            return single_trial(graph, &mut rng, directed);
+        }
+        let mut rng = RustRng::new(seed);
         return single_trial(graph, &mut rng, directed);
     }
 
     let worker_threads = resolve_trial_threads(trials, requested_threads);
 
-    let mut trial_results: Vec<(u32, TrialResult)> = if worker_threads == 1 {
-        let mut out = Vec::with_capacity(trials as usize);
-        for trial_index in 0..trials {
-            let mut rng = Mt19937::new(seed_for_trial(seed, trial_index));
-            let trial = single_trial(graph, &mut rng, directed);
-            out.push((trial_index, trial));
-        }
-        out
+    let mut trial_results: Vec<(u32, TrialResult)> = if parity_rng {
+        collect_trials_with_rng(
+            graph,
+            seed,
+            trials,
+            directed,
+            worker_threads,
+            Mt19937::new,
+        )
     } else {
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(worker_threads)
-            .build()
-            .expect("failed to build trial thread pool");
-
-        if trace_threads_enabled() {
-            eprintln!(
-                "[trial-par] requested_threads={} pool_threads={} trials={}",
-                worker_threads,
-                pool.current_num_threads(),
-                trials
-            );
-            let with_threads: Vec<(u32, TrialResult, String)> = pool.install(|| {
-                (0..trials)
-                    .into_par_iter()
-                    .map(|trial_index| {
-                        let mut rng = Mt19937::new(seed_for_trial(seed, trial_index));
-                        let trial = single_trial(graph, &mut rng, directed);
-                        let tid = format!("{:?}", std::thread::current().id());
-                        (trial_index, trial, tid)
-                    })
-                    .collect()
-            });
-
-            let mut unique_threads = std::collections::BTreeSet::new();
-            let mut out = Vec::with_capacity(with_threads.len());
-            for (trial_index, trial, tid) in with_threads {
-                unique_threads.insert(tid);
-                out.push((trial_index, trial));
-            }
-            eprintln!(
-                "[trial-par] used_worker_threads={}",
-                unique_threads.len()
-            );
-            out
-        } else {
-            pool.install(|| {
-                (0..trials)
-                    .into_par_iter()
-                    .map(|trial_index| {
-                        let mut rng = Mt19937::new(seed_for_trial(seed, trial_index));
-                        let trial = single_trial(graph, &mut rng, directed);
-                        (trial_index, trial)
-                    })
-                    .collect()
-            })
-        }
+        collect_trials_with_rng(
+            graph,
+            seed,
+            trials,
+            directed,
+            worker_threads,
+            RustRng::new,
+        )
     };
 
     // Deterministic best-trial selection independent of worker scheduling.
