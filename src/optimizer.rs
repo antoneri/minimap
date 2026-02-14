@@ -818,7 +818,58 @@ fn seed_for_trial(base_seed: u32, trial_index: u32) -> u32 {
     (z ^ (z >> 31)) as u32
 }
 
-pub fn run_trials(graph: &Graph, seed: u32, num_trials: u32, directed: bool) -> TrialResult {
+#[inline]
+fn trace_threads_enabled() -> bool {
+    std::env::var_os("MINIMAP_TRACE_THREADS").is_some()
+}
+
+#[inline]
+fn env_trial_threads() -> Option<usize> {
+    if let Some(v) = std::env::var_os("MINIMAP_TRIAL_THREADS") {
+        if let Ok(s) = v.into_string() {
+            if let Ok(n) = s.parse::<usize>() {
+                if n > 0 {
+                    return Some(n);
+                }
+            }
+        }
+    }
+
+    if let Some(v) = std::env::var_os("RAYON_NUM_THREADS") {
+        if let Ok(s) = v.into_string() {
+            if let Ok(n) = s.parse::<usize>() {
+                if n > 0 {
+                    return Some(n);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+#[inline]
+fn resolve_trial_threads(trials: u32, requested_threads: Option<usize>) -> usize {
+    let default_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+
+    let mut threads = requested_threads
+        .or_else(env_trial_threads)
+        .unwrap_or(default_threads);
+    if threads == 0 {
+        threads = 1;
+    }
+    threads.min(trials as usize).max(1)
+}
+
+pub fn run_trials(
+    graph: &Graph,
+    seed: u32,
+    num_trials: u32,
+    directed: bool,
+    requested_threads: Option<usize>,
+) -> TrialResult {
     let trials = num_trials.max(1);
 
     if trials == 1 {
@@ -826,14 +877,65 @@ pub fn run_trials(graph: &Graph, seed: u32, num_trials: u32, directed: bool) -> 
         return single_trial(graph, &mut rng, directed);
     }
 
-    let mut trial_results: Vec<(u32, TrialResult)> = (0..trials)
-        .into_par_iter()
-        .map(|trial_index| {
+    let worker_threads = resolve_trial_threads(trials, requested_threads);
+
+    let mut trial_results: Vec<(u32, TrialResult)> = if worker_threads == 1 {
+        let mut out = Vec::with_capacity(trials as usize);
+        for trial_index in 0..trials {
             let mut rng = Mt19937::new(seed_for_trial(seed, trial_index));
             let trial = single_trial(graph, &mut rng, directed);
-            (trial_index, trial)
-        })
-        .collect();
+            out.push((trial_index, trial));
+        }
+        out
+    } else {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(worker_threads)
+            .build()
+            .expect("failed to build trial thread pool");
+
+        if trace_threads_enabled() {
+            eprintln!(
+                "[trial-par] requested_threads={} pool_threads={} trials={}",
+                worker_threads,
+                pool.current_num_threads(),
+                trials
+            );
+            let with_threads: Vec<(u32, TrialResult, String)> = pool.install(|| {
+                (0..trials)
+                    .into_par_iter()
+                    .map(|trial_index| {
+                        let mut rng = Mt19937::new(seed_for_trial(seed, trial_index));
+                        let trial = single_trial(graph, &mut rng, directed);
+                        let tid = format!("{:?}", std::thread::current().id());
+                        (trial_index, trial, tid)
+                    })
+                    .collect()
+            });
+
+            let mut unique_threads = std::collections::BTreeSet::new();
+            let mut out = Vec::with_capacity(with_threads.len());
+            for (trial_index, trial, tid) in with_threads {
+                unique_threads.insert(tid);
+                out.push((trial_index, trial));
+            }
+            eprintln!(
+                "[trial-par] used_worker_threads={}",
+                unique_threads.len()
+            );
+            out
+        } else {
+            pool.install(|| {
+                (0..trials)
+                    .into_par_iter()
+                    .map(|trial_index| {
+                        let mut rng = Mt19937::new(seed_for_trial(seed, trial_index));
+                        let trial = single_trial(graph, &mut rng, directed);
+                        (trial_index, trial)
+                    })
+                    .collect()
+            })
+        }
+    };
 
     // Deterministic best-trial selection independent of worker scheduling.
     trial_results.sort_unstable_by_key(|(trial_index, _)| *trial_index);

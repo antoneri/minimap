@@ -31,3 +31,33 @@ fn cli_defaults_to_tree_output() {
     assert!(!cfg.print_clu);
     assert!(!cfg.print_ftree);
 }
+
+#[test]
+fn cli_parses_threads_flag_separate_value() {
+    let args = vec![
+        "--silent".to_string(),
+        "--num-trials".to_string(),
+        "8".to_string(),
+        "--threads".to_string(),
+        "6".to_string(),
+        "in.net".to_string(),
+        "out".to_string(),
+    ];
+    let cfg = minimap::cli::parse_args(&args).unwrap();
+    assert_eq!(cfg.num_trials, 8);
+    assert_eq!(cfg.trial_threads, Some(6));
+}
+
+#[test]
+fn cli_parses_threads_flag_equals_value() {
+    let args = vec![
+        "--silent".to_string(),
+        "--num-trials=8".to_string(),
+        "--threads=5".to_string(),
+        "in.net".to_string(),
+        "out".to_string(),
+    ];
+    let cfg = minimap::cli::parse_args(&args).unwrap();
+    assert_eq!(cfg.num_trials, 8);
+    assert_eq!(cfg.trial_threads, Some(5));
+}

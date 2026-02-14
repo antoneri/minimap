@@ -20,7 +20,13 @@ fn run() -> Result<(), String> {
         },
     );
 
-    let trial = minimap::optimizer::run_trials(&graph, cfg.seed, cfg.num_trials, cfg.directed);
+    let trial = minimap::optimizer::run_trials(
+        &graph,
+        cfg.seed,
+        cfg.num_trials,
+        cfg.directed,
+        cfg.trial_threads,
+    );
 
     let elapsed = start.elapsed();
     let _written = minimap::output::write_outputs(&cfg, &graph, &trial, start_system, elapsed)?;

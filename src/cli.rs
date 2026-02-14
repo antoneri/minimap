@@ -9,6 +9,10 @@ fn parse_i32(s: &str) -> Option<i32> {
     s.parse::<i32>().ok()
 }
 
+fn parse_usize(s: &str) -> Option<usize> {
+    s.parse::<usize>().ok()
+}
+
 fn parse_bool_output(list: &str, tree: &mut bool, clu: &mut bool, ftree: &mut bool) {
     for token in list.split(',') {
         match token.trim() {
@@ -29,6 +33,7 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
     let mut directed = false;
     let mut seed = 123u32;
     let mut num_trials = 1u32;
+    let mut trial_threads: Option<usize> = None;
     let mut silent = false;
     let mut print_tree = false;
     let mut print_clu = false;
@@ -50,6 +55,15 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
         if let Some(rest) = tok.strip_prefix("--num-trials=") {
             if let Some(v) = parse_u32(rest) {
                 num_trials = v.max(1);
+            }
+            i += 1;
+            continue;
+        }
+        if let Some(rest) = tok.strip_prefix("--threads=") {
+            if let Some(v) = parse_usize(rest) {
+                if v > 0 {
+                    trial_threads = Some(v);
+                }
             }
             i += 1;
             continue;
@@ -94,6 +108,18 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
                 if let Some(next) = args.get(i + 1) {
                     if let Some(v) = parse_u32(next) {
                         num_trials = v.max(1);
+                    }
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            "--threads" => {
+                if let Some(next) = args.get(i + 1) {
+                    if let Some(v) = parse_usize(next) {
+                        if v > 0 {
+                            trial_threads = Some(v);
+                        }
                     }
                     i += 2;
                 } else {
@@ -193,6 +219,7 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
         directed,
         seed,
         num_trials,
+        trial_threads,
         silent,
         print_tree,
         print_clu,
