@@ -102,24 +102,23 @@ minimap modular_wd.net . --directed --two-level --output tree,clu,ftree --seed 1
 
 ## Benchmark examples
 
-Example numbers from local runs on **2026-02-14** (release build, 1M-edge synthetic network, `--num-trials 8`, median of 3 runs):
+Example numbers from local runs on **2026-02-15** (`100k` synthetic edge list, one run per point, Infomap built with OpenMP and run with `--inner-parallelization`):
 
-| Tool/config | Wall time | Peak RSS |
-| --- | ---: | ---: |
-| Infomap (no OpenMP build) | 21.16 s | 1254.9 MiB |
-| minimap `--threads 1` | 4.95 s | 265.4 MiB |
-| minimap `--threads 8` | 1.35 s | 1253.9 MiB |
-
-Derived ratios from the above run:
-
-- minimap `--threads 1` vs Infomap: `4.27x` faster, much lower RSS
-- minimap `--threads 8` vs Infomap: `15.67x` faster, similar RSS
-- minimap `--threads 8` vs minimap `--threads 1`: `3.67x` faster, higher RSS
+| `--num-trials` | Tool/config | Effective workers | Wall time | Peak RSS (KiB) | Top modules | Codelength |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | `infomap` (`OMP_NUM_THREADS=1`) | 1 | 4.71 s | 42,800 | 2138 | 4.93197 |
+| 1 | `infomap` (`OMP_NUM_THREADS=12`) | 12 | 1.52 s | 70,880 | 2136 | 4.93218 |
+| 1 | `minimap` | 1 | 0.06 s | 29,984 | 2167 | 4.93144 |
+| 1 | `minimap` | 1 | 0.05 s | 29,280 | 2167 | 4.93144 |
+| 8 | `infomap` (`OMP_NUM_THREADS=1`) | 1 | 35.14 s | 141,456 | 2135 | 4.93177 |
+| 8 | `infomap` (`OMP_NUM_THREADS=12`) | 12 | 11.20 s | 168,608 | 2133 | 4.93187 |
+| 8 | `minimap --threads 1` | 1 | 0.26 s | 35,456 | 2167 | 4.93144 |
+| 8 | `minimap --threads 8` | 8 | 0.12 s | 152,128 | 2167 | 4.93144 |
 
 Notes:
 
-- Peak RSS was collected with `/usr/bin/time -lp`.
-- These are example results, not universal guarantees.
+- Peak RSS was collected with `/usr/bin/time -lp` and converted from bytes to KiB (`bytes / 1024`).
+- These are environment-specific example results, not universal guarantees.
 
 ## Author
 
