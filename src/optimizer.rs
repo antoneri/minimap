@@ -2,7 +2,6 @@ use crate::graph::{FlowData, Graph};
 use crate::objective::{DeltaFlow, MapEquationObjective, plogp};
 use crate::rng_compat::{Mt19937, RustRng, TrialRng};
 use rayon::prelude::*;
-use rustc_hash::FxHashMap;
 
 const CORE_LOOP_LIMIT: usize = 10;
 const MIN_CODELENGTH_IMPROVEMENT: f64 = 1e-10;
@@ -58,6 +57,19 @@ struct OptimizeWorkspace {
     module_order: Vec<u32>,
     module_indices: Vec<u32>,
     flow_data: Vec<FlowData>,
+    consolidate_module_counts: Vec<u32>,
+    consolidate_module_offsets: Vec<u32>,
+    consolidate_module_fill: Vec<u32>,
+    consolidate_module_nodes: Vec<u32>,
+    consolidate_dst_stamp: Vec<u32>,
+    consolidate_dst_flow: Vec<f64>,
+    consolidate_touched_dsts: Vec<u32>,
+    consolidate_edge_src: Vec<u32>,
+    consolidate_edge_dst: Vec<u32>,
+    consolidate_edge_flow: Vec<f64>,
+    consolidate_out_counts: Vec<u32>,
+    consolidate_in_counts: Vec<u32>,
+    consolidate_stamp_gen: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -176,7 +188,12 @@ impl ActiveNetwork {
         }
     }
 
-    fn consolidate(&self, node_module: &[u32], module_data: &[FlowData]) -> Self {
+    fn consolidate(
+        &self,
+        node_module: &[u32],
+        module_data: &[FlowData],
+        workspace: &mut OptimizeWorkspace,
+    ) -> Self {
         let n = self.node_count();
         let mut old_to_new = vec![u32::MAX; module_data.len()];
         let mut ordered_old_modules = Vec::<u32>::new();
@@ -210,61 +227,138 @@ impl ActiveNetwork {
                 .extend_from_slice(&self.nodes[i].members);
         }
 
-        let mut edge_map: FxHashMap<u64, f64> = FxHashMap::default();
-        edge_map.reserve(self.out_neighbor.len());
+        let new_n = new_nodes.len();
+        let OptimizeWorkspace {
+            consolidate_module_counts,
+            consolidate_module_offsets,
+            consolidate_module_fill,
+            consolidate_module_nodes,
+            consolidate_dst_stamp,
+            consolidate_dst_flow,
+            consolidate_touched_dsts,
+            consolidate_edge_src,
+            consolidate_edge_dst,
+            consolidate_edge_flow,
+            consolidate_out_counts,
+            consolidate_in_counts,
+            consolidate_stamp_gen,
+            ..
+        } = workspace;
 
+        consolidate_module_counts.resize(new_n, 0);
+        consolidate_module_counts.fill(0);
         for i in 0..n {
-            let src_m = old_to_new[node_module[i] as usize];
-            for e in self.out_range(i) {
-                let t = self.out_neighbor[e];
-                let f = self.out_flow[e];
-                let dst_m = old_to_new[node_module[t as usize] as usize];
-                if src_m == dst_m {
-                    continue;
+            let src_m = old_to_new[node_module[i] as usize] as usize;
+            consolidate_module_counts[src_m] += 1;
+        }
+
+        consolidate_module_offsets.resize(new_n + 1, 0);
+        consolidate_module_offsets[0] = 0;
+        for i in 0..new_n {
+            consolidate_module_offsets[i + 1] =
+                consolidate_module_offsets[i] + consolidate_module_counts[i];
+        }
+
+        consolidate_module_fill.resize(new_n, 0);
+        consolidate_module_fill.fill(0);
+        consolidate_module_nodes.resize(n, 0);
+        for i in 0..n {
+            let src_m = old_to_new[node_module[i] as usize] as usize;
+            let pos = consolidate_module_offsets[src_m] + consolidate_module_fill[src_m];
+            consolidate_module_nodes[pos as usize] = i as u32;
+            consolidate_module_fill[src_m] += 1;
+        }
+
+        consolidate_dst_stamp.resize(new_n, 0);
+        consolidate_dst_flow.resize(new_n, 0.0);
+        consolidate_touched_dsts.clear();
+        consolidate_edge_src.clear();
+        consolidate_edge_dst.clear();
+        consolidate_edge_flow.clear();
+
+        let mut stamp_gen = consolidate_stamp_gen.wrapping_add(1);
+        if stamp_gen == 0 {
+            consolidate_dst_stamp.fill(0);
+            stamp_gen = 1;
+        }
+
+        for src_m in 0..new_n {
+            consolidate_touched_dsts.clear();
+
+            let start = consolidate_module_offsets[src_m] as usize;
+            let end = consolidate_module_offsets[src_m + 1] as usize;
+            for p in start..end {
+                let node_idx = consolidate_module_nodes[p] as usize;
+                for e in self.out_range(node_idx) {
+                    let target_node = self.out_neighbor[e] as usize;
+                    let dst_m = old_to_new[node_module[target_node] as usize] as usize;
+                    if src_m == dst_m {
+                        continue;
+                    }
+
+                    let flow = self.out_flow[e];
+                    if consolidate_dst_stamp[dst_m] != stamp_gen {
+                        consolidate_dst_stamp[dst_m] = stamp_gen;
+                        consolidate_dst_flow[dst_m] = flow;
+                        consolidate_touched_dsts.push(dst_m as u32);
+                    } else {
+                        consolidate_dst_flow[dst_m] += flow;
+                    }
                 }
-                let key = ((src_m as u64) << 32) | (dst_m as u64);
-                *edge_map.entry(key).or_insert(0.0) += f;
+            }
+
+            consolidate_touched_dsts.sort_unstable();
+            for &dst_m in consolidate_touched_dsts.iter() {
+                let dst_idx = dst_m as usize;
+                consolidate_edge_src.push(src_m as u32);
+                consolidate_edge_dst.push(dst_m);
+                consolidate_edge_flow.push(consolidate_dst_flow[dst_idx]);
+            }
+
+            stamp_gen = stamp_gen.wrapping_add(1);
+            if stamp_gen == 0 {
+                consolidate_dst_stamp.fill(0);
+                stamp_gen = 1;
             }
         }
+        *consolidate_stamp_gen = stamp_gen;
 
-        let mut edges: Vec<(u32, u32, f64)> = edge_map
-            .into_iter()
-            .map(|(k, v)| (((k >> 32) as u32), (k as u32), v))
-            .collect();
-        edges.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-
-        let new_n = new_nodes.len();
-        let mut out_counts = vec![0u32; new_n];
-        let mut in_counts = vec![0u32; new_n];
-        for &(s, t, _) in &edges {
-            out_counts[s as usize] += 1;
-            in_counts[t as usize] += 1;
+        consolidate_out_counts.resize(new_n, 0);
+        consolidate_in_counts.resize(new_n, 0);
+        consolidate_out_counts.fill(0);
+        consolidate_in_counts.fill(0);
+        for idx in 0..consolidate_edge_src.len() {
+            let src_m = consolidate_edge_src[idx] as usize;
+            let dst_m = consolidate_edge_dst[idx] as usize;
+            consolidate_out_counts[src_m] += 1;
+            consolidate_in_counts[dst_m] += 1;
         }
 
-        let out_offsets = Self::prefix_offsets(&out_counts);
-        let in_offsets = Self::prefix_offsets(&in_counts);
+        let out_offsets = Self::prefix_offsets(consolidate_out_counts);
+        let in_offsets = Self::prefix_offsets(consolidate_in_counts);
         let total_edges = out_offsets[new_n] as usize;
 
         let mut out_neighbor = vec![0u32; total_edges];
         let mut out_flow = vec![0.0f64; total_edges];
         let mut in_neighbor = vec![0u32; total_edges];
         let mut in_flow = vec![0.0f64; total_edges];
-        let mut out_fill = vec![0u32; new_n];
         let mut in_fill = vec![0u32; new_n];
 
-        for (s, t, f) in edges {
-            let s_idx = s as usize;
-            let t_idx = t as usize;
+        for idx in 0..total_edges {
+            out_neighbor[idx] = consolidate_edge_dst[idx];
+            out_flow[idx] = consolidate_edge_flow[idx];
+        }
 
-            let out_pos = out_offsets[s_idx] + out_fill[s_idx];
-            out_neighbor[out_pos as usize] = t;
-            out_flow[out_pos as usize] = f;
-            out_fill[s_idx] += 1;
+        for idx in 0..total_edges {
+            let src_m = consolidate_edge_src[idx];
+            let dst_m = consolidate_edge_dst[idx];
+            let flow = consolidate_edge_flow[idx];
+            let dst_idx = dst_m as usize;
 
-            let in_pos = in_offsets[t_idx] + in_fill[t_idx];
-            in_neighbor[in_pos as usize] = s;
-            in_flow[in_pos as usize] = f;
-            in_fill[t_idx] += 1;
+            let in_pos = in_offsets[dst_idx] + in_fill[dst_idx];
+            in_neighbor[in_pos as usize] = src_m;
+            in_flow[in_pos as usize] = flow;
+            in_fill[dst_idx] += 1;
         }
 
         for i in 0..new_n {
@@ -805,7 +899,7 @@ fn find_top_modules_repeatedly_from_leaf(
             break;
         }
 
-        let next = active.consolidate(&level.node_module, &level.module_data);
+        let next = active.consolidate(&level.node_module, &level.module_data, workspace);
         consolidated_codelength = level.codelength;
         have_modules = true;
         aggregation_level += 1;
@@ -848,7 +942,7 @@ fn find_top_modules_repeatedly_from_modules(
             break;
         }
 
-        let next = active.consolidate(&level.node_module, &level.module_data);
+        let next = active.consolidate(&level.node_module, &level.module_data, workspace);
         consolidated_codelength = level.codelength;
         aggregation_level += 1;
 
@@ -890,7 +984,7 @@ fn fine_tune(
         return 0;
     }
 
-    *top_network = leaf_network.consolidate(&level.node_module, &level.module_data);
+    *top_network = leaf_network.consolidate(&level.node_module, &level.module_data, workspace);
     level.effective_loops
 }
 
