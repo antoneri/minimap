@@ -13,6 +13,26 @@ fn trace_super_enabled() -> bool {
     std::env::var_os("MINIMAP_TRACE_SUPER").is_some()
 }
 
+#[inline]
+fn super_validation_limit() -> usize {
+    if std::env::var_os("MINIMAP_VALIDATE_SUPER").is_none() {
+        return 0;
+    }
+    if let Some(v) = std::env::var_os("MINIMAP_VALIDATE_SUPER_N") {
+        if let Ok(s) = v.into_string() {
+            if let Ok(n) = s.parse::<usize>() {
+                return n.max(1);
+            }
+        }
+    }
+    8
+}
+
+#[inline]
+fn super_validation_strict() -> bool {
+    std::env::var_os("MINIMAP_VALIDATE_SUPER_STRICT").is_some()
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct EdgeSpan {
     start: u32,
@@ -123,6 +143,7 @@ struct OptimizeLevelResult {
     node_module: Vec<u32>,
     module_data: Vec<FlowData>,
     codelength: f64,
+    index_codelength: f64,
     effective_loops: u32,
 }
 
@@ -1246,6 +1267,7 @@ fn optimize_active_network_with_adj<A: AdjAccess>(
         node_module,
         module_data,
         codelength: objective.codelength,
+        index_codelength: objective.index_codelength,
         effective_loops,
     }
 }
@@ -1885,6 +1907,64 @@ fn optimize_two_level_from_leaf<'g>(
     top_network
 }
 
+fn validate_super_decision_against_slow<'g>(
+    super_leaf_network: &ActiveNetwork<'g>,
+    directed: bool,
+    old_index_length: f64,
+    fast_trivial: bool,
+    fast_accept: bool,
+    fast_codelength: f64,
+    sample_idx: usize,
+) {
+    let seed = 0x9E37_79B9u32
+        .wrapping_add(sample_idx as u32)
+        .wrapping_mul(7919);
+    let mut ref_rng = Mt19937::new(seed);
+    let mut ref_workspace = OptimizeWorkspace::default();
+
+    let mut ref_node_data = Vec::with_capacity(super_leaf_network.nodes.len());
+    for node in &super_leaf_network.nodes {
+        ref_node_data.push(node.data);
+    }
+    let mut ref_objective = MapEquationObjective::new(&ref_node_data);
+    let ref_one_level =
+        active_modules_codelength(super_leaf_network, &mut ref_objective, &mut ref_workspace);
+    let ref_top = optimize_two_level_from_leaf(
+        super_leaf_network,
+        &mut ref_objective,
+        &mut ref_rng,
+        directed,
+        ref_one_level,
+        false,
+        true,
+        &mut ref_workspace,
+    );
+    let ref_assignment = assignment_from_top_network(&ref_top, super_leaf_network.node_count());
+    let ref_num_modules = assignment_module_count(&ref_assignment);
+    let ref_trivial = ref_num_modules == 1 || ref_num_modules == super_leaf_network.nodes.len();
+    let ref_codelength =
+        active_modules_codelength(&ref_top, &mut ref_objective, &mut ref_workspace);
+    let ref_accept = !ref_trivial && ref_codelength < old_index_length - MIN_CODELENGTH_IMPROVEMENT;
+
+    if fast_trivial != ref_trivial || fast_accept != ref_accept {
+        let msg = format!(
+            "super decision mismatch: fast(trivial={}, accept={}, codelength={}) slow(trivial={}, accept={}, codelength={}) old_index={}",
+            fast_trivial,
+            fast_accept,
+            fast_codelength,
+            ref_trivial,
+            ref_accept,
+            ref_codelength,
+            old_index_length
+        );
+        if super_validation_strict() {
+            panic!("{msg}");
+        } else {
+            eprintln!("[super-validate] {msg}");
+        }
+    }
+}
+
 struct SuperHierarchySearch<'g> {
     active_top: ActiveNetwork<'g>,
     // Per accepted level: previous-level module id -> new super-module id.
@@ -1905,6 +1985,8 @@ fn find_hierarchical_super_modules_fast<'g>(
     let mut old_index_length = active_modules_terms(&active, objective, workspace).1;
     let mut num_non_trivial_top_modules = usize::MAX;
     let mut super_assignments = Vec::<Vec<u32>>::new();
+    let mut validate_remaining = super_validation_limit();
+    let mut validate_sample_idx = 0usize;
 
     while active.nodes.len() > 1 && num_non_trivial_top_modules > 1 {
         let mut super_active = active.clone();
@@ -1916,26 +1998,38 @@ fn find_hierarchical_super_modules_fast<'g>(
         }
         let mut super_objective = MapEquationObjective::new(&super_node_data);
 
-        let super_one_level_codelength =
-            active_modules_codelength(&super_leaf_network, &mut super_objective, workspace);
-        let super_top = optimize_two_level_from_leaf(
+        let level = optimize_active_network(
             &super_leaf_network,
-            &mut super_objective,
             rng,
+            &mut super_objective,
             directed,
-            super_one_level_codelength,
+            None,
             false,
-            true,
+            CORE_LOOP_LIMIT,
             workspace,
         );
+        let super_codelength = level.codelength;
+        let super_index_codelength = level.index_codelength;
 
-        let super_assignment =
-            assignment_from_top_network(&super_top, super_leaf_network.node_count());
-        let num_super_modules = assignment_module_count(&super_assignment);
+        let mut old_to_new = vec![u32::MAX; level.module_data.len()];
+        let mut next_module = 0u32;
+        let mut layer_assignment = Vec::<u32>::with_capacity(level.node_module.len());
+        for &m in &level.node_module {
+            let idx = m as usize;
+            let mapped = if old_to_new[idx] == u32::MAX {
+                let mapped = next_module;
+                old_to_new[idx] = mapped;
+                next_module += 1;
+                mapped
+            } else {
+                old_to_new[idx]
+            };
+            layer_assignment.push(mapped);
+        }
+
+        let num_super_modules = next_module as usize;
         let trivial_solution =
             num_super_modules == 1 || num_super_modules == super_leaf_network.nodes.len();
-        let (super_codelength, super_index_codelength) =
-            active_modules_terms(&super_top, &mut super_objective, workspace);
 
         if trace_super_enabled() {
             eprintln!(
@@ -1948,6 +2042,21 @@ fn find_hierarchical_super_modules_fast<'g>(
             );
         }
 
+        if validate_remaining > 0 {
+            validate_super_decision_against_slow(
+                &super_leaf_network,
+                directed,
+                old_index_length,
+                trivial_solution,
+                !trivial_solution
+                    && super_codelength < old_index_length - MIN_CODELENGTH_IMPROVEMENT,
+                super_codelength,
+                validate_sample_idx,
+            );
+            validate_remaining -= 1;
+            validate_sample_idx = validate_sample_idx.wrapping_add(1);
+        }
+
         if trivial_solution {
             if trace_super_enabled() {
                 eprintln!("[super] reject=trivial");
@@ -1955,8 +2064,8 @@ fn find_hierarchical_super_modules_fast<'g>(
             break;
         }
 
-        // Infomap super-level acceptance compares full two-level super codelength
-        // against the previous level's index codelength.
+        // Infomap fast super-level acceptance:
+        // !trivial && codelength < old_index_length - minimumCodelengthImprovement.
         if super_codelength >= old_index_length - MIN_CODELENGTH_IMPROVEMENT {
             if trace_super_enabled() {
                 eprintln!("[super] reject=no_super_improvement");
@@ -1964,19 +2073,15 @@ fn find_hierarchical_super_modules_fast<'g>(
             break;
         }
 
-        let mut super_module_members = vec![0u32; super_top.nodes.len()];
-        for &m in &super_assignment {
+        let mut super_module_members = vec![0u32; num_super_modules];
+        for &m in &layer_assignment {
             super_module_members[m as usize] += 1;
         }
         num_non_trivial_top_modules = super_module_members.iter().filter(|&&n| n > 1).count();
 
-        let mut super_module_data = Vec::with_capacity(super_top.nodes.len());
-        for node in &super_top.nodes {
-            super_module_data.push(node.data);
-        }
-        super_assignments.push(super_assignment.clone());
+        super_assignments.push(layer_assignment);
         active =
-            super_active.consolidate(&super_assignment, &super_module_data, directed, workspace);
+            super_active.consolidate(&level.node_module, &level.module_data, directed, workspace);
         refresh_active_data_from_leaf_network(leaf_network, &mut active, directed);
         old_index_length = super_index_codelength;
     }
