@@ -9,8 +9,15 @@ const MIN_SINGLE_NODE_IMPROVEMENT: f64 = 1e-16;
 const MIN_RELATIVE_TUNE_ITERATION_IMPROVEMENT: f64 = 1e-5;
 
 #[inline]
+#[cfg(debug_assertions)]
 fn trace_super_enabled() -> bool {
     std::env::var_os("MINIMAP_TRACE_SUPER").is_some()
+}
+
+#[inline]
+#[cfg(not(debug_assertions))]
+fn trace_super_enabled() -> bool {
+    false
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,8 +81,15 @@ fn super_mode_recurse() -> SuperSearchMode {
 }
 
 #[inline]
+#[cfg(debug_assertions)]
 fn trace_split_enabled() -> bool {
     std::env::var_os("MINIMAP_TRACE_SPLIT").is_some()
+}
+
+#[inline]
+#[cfg(not(debug_assertions))]
+fn trace_split_enabled() -> bool {
+    false
 }
 
 #[inline]
@@ -84,6 +98,7 @@ fn is_strict_codelength_improvement(old_value: f64, new_value: f64) -> bool {
 }
 
 #[inline]
+#[cfg(debug_assertions)]
 fn super_validation_limit() -> usize {
     if std::env::var_os("MINIMAP_VALIDATE_SUPER").is_none() {
         return 0;
@@ -99,6 +114,13 @@ fn super_validation_limit() -> usize {
 }
 
 #[inline]
+#[cfg(not(debug_assertions))]
+fn super_validation_limit() -> usize {
+    0
+}
+
+#[inline]
+#[cfg(debug_assertions)]
 fn super_validation_strict() -> bool {
     std::env::var_os("MINIMAP_VALIDATE_SUPER_STRICT").is_some()
 }
@@ -1979,6 +2001,7 @@ fn optimize_two_level_from_leaf<'g>(
     top_network
 }
 
+#[cfg(debug_assertions)]
 fn validate_super_decision_against_slow<'g>(
     super_leaf_network: &ActiveNetwork<'g>,
     directed: bool,
@@ -2032,6 +2055,18 @@ fn validate_super_decision_against_slow<'g>(
             eprintln!("[super-validate] {msg}");
         }
     }
+}
+
+#[cfg(not(debug_assertions))]
+fn validate_super_decision_against_slow<'g>(
+    _super_leaf_network: &ActiveNetwork<'g>,
+    _directed: bool,
+    _old_index_length: f64,
+    _fast_trivial: bool,
+    _fast_accept: bool,
+    _fast_codelength: f64,
+    _sample_idx: usize,
+) {
 }
 
 struct SuperHierarchySearch<'g> {
@@ -2648,6 +2683,7 @@ fn module_depth_from_parent(module_parent: &[u32], module_idx: u32) -> u32 {
 }
 
 #[inline]
+#[cfg(debug_assertions)]
 fn split_term_validation_limit() -> usize {
     if std::env::var_os("MINIMAP_VALIDATE_SPLIT_TERM").is_none() {
         return 0;
@@ -2660,6 +2696,12 @@ fn split_term_validation_limit() -> usize {
         }
     }
     16
+}
+
+#[inline]
+#[cfg(not(debug_assertions))]
+fn split_term_validation_limit() -> usize {
+    0
 }
 
 fn local_module_term_codelength_active(
@@ -2922,6 +2964,7 @@ fn candidate_split_local_codelength_with_adj<A: AdjAccess>(
     parent_term + inserted_terms
 }
 
+#[cfg(debug_assertions)]
 fn validate_fast_split_local_codelength(
     graph: &Graph,
     hierarchy: &DynamicHierarchy,
@@ -2963,6 +3006,18 @@ fn validate_fast_split_local_codelength(
             module_idx, fast_local_codelength, slow_local_codelength, diff
         );
     }
+}
+
+#[cfg(not(debug_assertions))]
+fn validate_fast_split_local_codelength(
+    _graph: &Graph,
+    _hierarchy: &DynamicHierarchy,
+    _module_idx: u32,
+    _sub_hierarchy: &HierarchyResult,
+    _parent_members: &[u32],
+    _directed: bool,
+    _fast_local_codelength: f64,
+) {
 }
 
 fn build_hierarchy_from_layers(

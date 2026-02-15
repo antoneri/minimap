@@ -122,21 +122,66 @@ minimap ninetriangles.net . --multilevel --output tree,clu,ftree --seed 123 --nu
 
 Benchmark harness policy: Infomap runs use `OMP_NUM_THREADS=12`.
 
-Example numbers from local runs on **2026-02-15** (`100k` synthetic edge list, one run per point, Infomap built with OpenMP and run with `--inner-parallelization`):
+Example numbers from local runs on **2026-02-15** using:
 
-| `--num-trials` | Tool/config | Effective workers | Wall time | Peak RSS (KiB) | Top modules | Codelength |
-| ---: | --- | ---: | ---: | ---: | ---: | ---: |
-| 1 | `infomap` (`OMP_NUM_THREADS=1`) | 1 | 11.37 s | 55,296 | 1630 | 13.4330 |
-| 1 | `infomap` (`OMP_NUM_THREADS=12`) | 12 | 2.43 s | 90,128 | 1639 | 13.4342 |
-| 1 | `minimap` | 1 | 0.17 s | 31,216 | 1598 | 13.4361 |
-| 8 | `infomap` (`OMP_NUM_THREADS=1`) | 1 | 86.38 s | 126,864 | 1630 | 13.4330 |
-| 8 | `infomap` (`OMP_NUM_THREADS=12`) | 12 | 17.48 s | 173,824 | 1630 | 13.4353 |
-| 8 | `minimap --threads 1` | 1 | 1.15 s | 39,120 | 1602 | 13.4339 |
-| 8 | `minimap --threads 8` | 8 | 0.21 s | 113,888 | 1602 | 13.4339 |
+- `python3 scripts/run_benchmark_matrix.py --out-dir /tmp/minimap_bench_matrix_latest2`
+- 4 modes (`undirected|directed` x `two-level|multilevel`)
+- trials `{1, 8}`
+- datasets `{100k, 1M}` synthetic edge lists
+
+### 100k (`--num-trials 1`)
+
+| Mode | Tool/config | Effective workers | Wall time | Peak RSS (KiB) | Top modules | Depth | Codelength |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| undirected/multilevel | `infomap` (`OMP_NUM_THREADS=12`) | 12 | 3.43 s | 82240 | 1320 | 2 | 13.8494 |
+| undirected/multilevel | `minimap --threads 1` | 1 | 0.35 s | 31792 | 1371 | 2 | 13.8570 |
+| undirected/two-level | `infomap` (`OMP_NUM_THREADS=12`) | 12 | 3.30 s | 89408 | 1303 | 2 | 13.8510 |
+| undirected/two-level | `minimap --threads 1` | 1 | 0.26 s | 31472 | 1390 | 2 | 13.8630 |
+| directed/multilevel | `infomap` (`OMP_NUM_THREADS=12`) | 12 | 24.49 s | 82064 | 54 | 5 | 10.0246 |
+| directed/multilevel | `minimap --threads 1` | 1 | 0.33 s | 34128 | 1993 | 5 | 10.1281 |
+| directed/two-level | `infomap` (`OMP_NUM_THREADS=12`) | 12 | 4.37 s | 83488 | 1989 | 2 | 10.1635 |
+| directed/two-level | `minimap --threads 1` | 1 | 0.23 s | 31408 | 1997 | 2 | 10.1635 |
+
+### 100k (`--num-trials 8`)
+
+| Mode | Tool/config | Effective workers | Wall time | Peak RSS (KiB) | Top modules | Depth | Codelength |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| undirected/multilevel | `infomap` (`OMP_NUM_THREADS=12`) | 12 | 27.20 s | 159312 | 1316 | 2 | 13.8425 |
+| undirected/multilevel | `minimap --threads 8` | 8 | 0.75 s | 135936 | 1385 | 2 | 13.8119 |
+| undirected/two-level | `infomap` (`OMP_NUM_THREADS=12`) | 12 | 24.51 s | 157792 | 1291 | 2 | 13.8444 |
+| undirected/two-level | `minimap --threads 8` | 8 | 0.51 s | 119696 | 1405 | 2 | 13.8473 |
+| directed/multilevel | `infomap` (`OMP_NUM_THREADS=12`) | 12 | 181.59 s | 166160 | 54 | 5 | 10.0267 |
+| directed/multilevel | `minimap --threads 8` | 8 | 0.88 s | 153424 | 6 | 7 | 10.1076 |
+| directed/two-level | `infomap` (`OMP_NUM_THREADS=12`) | 12 | 41.48 s | 152256 | 1985 | 2 | 10.1597 |
+| directed/two-level | `minimap --threads 8` | 8 | 0.31 s | 118704 | 2011 | 2 | 10.1548 |
+
+### 1M (`--num-trials 1`)
+
+| Mode | Tool/config | Effective workers | Wall time | Peak RSS (KiB) | Top modules | Depth | Codelength |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| undirected/multilevel | `infomap` (`OMP_NUM_THREADS=12`) | 12 | 390.57 s | 471792 | 16219 | 2 | 16.7107 |
+| undirected/multilevel | `minimap --threads 1` | 1 | 5.40 s | 258368 | 13801 | 2 | 16.7578 |
+| undirected/two-level | `infomap` (`OMP_NUM_THREADS=12`) | 12 | 405.15 s | 487120 | 16224 | 2 | 16.7104 |
+| undirected/two-level | `minimap --threads 1` | 1 | 3.90 s | 289040 | 13801 | 2 | 16.7636 |
+| directed/multilevel | `infomap` (`OMP_NUM_THREADS=12`) | 12 | 18.74 s | 557840 | 17177 | 5 | 12.0636 |
+| directed/multilevel | `minimap --threads 1` | 1 | 4.70 s | 251264 | 16431 | 5 | 12.1188 |
+| directed/two-level | `infomap` (`OMP_NUM_THREADS=12`) | 12 | 15.16 s | 549104 | 17177 | 2 | 12.1218 |
+| directed/two-level | `minimap --threads 1` | 1 | 3.26 s | 251408 | 16384 | 2 | 12.1756 |
+
+### 1M (`--num-trials 8`)
+
+| Mode | Tool/config | Effective workers | Wall time | Peak RSS (KiB) | Top modules | Depth | Codelength |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| undirected/multilevel | `minimap --threads 8` | 8 | 7.47 s | 1064416 | 13961 | 2 | 16.7561 |
+| undirected/two-level | `minimap --threads 8` | 8 | 6.02 s | 923152 | 13784 | 2 | 16.7621 |
+| directed/multilevel | `minimap --threads 8` | 8 | 7.10 s | 1155584 | 16445 | 5 | 12.1155 |
+| directed/two-level | `minimap --threads 8` | 8 | 5.67 s | 935456 | 16463 | 2 | 12.1694 |
 
 Notes:
 
 - Peak RSS was collected with `/usr/bin/time -lp` and converted from bytes to KiB (`bytes / 1024`).
+- Infomap rows for `1M` + `--num-trials 8` are intentionally skipped by default in the matrix harness (`--skip-infomap-1m-trials8`) due very high runtime.
+- The matrix harness includes fallback retry for Infomap runs that fail with `--inner-parallelization`; retries keep `OMP_NUM_THREADS=12` and remove only `--inner-parallelization` for that case.
 - These are environment-specific example results, not universal guarantees.
 
 ## Author
