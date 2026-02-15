@@ -190,6 +190,10 @@ struct OptimizeWorkspace {
     recurse_sub_out_counts: Vec<u32>,
     recurse_sub_in_counts: Vec<u32>,
     recurse_sub_in_fill: Vec<u32>,
+    // Reused by fast super-level search.
+    super_old_to_new: Vec<u32>,
+    super_layer_assignment: Vec<u32>,
+    super_module_members: Vec<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -1992,11 +1996,12 @@ fn find_hierarchical_super_modules_fast<'g>(
         let mut super_active = active.clone();
         transform_node_flow_to_enter_flow(&mut super_active);
         let super_leaf_network = super_active.with_compact_members();
-        let mut super_node_data = Vec::with_capacity(super_active.nodes.len());
+        workspace.flow_data.clear();
+        workspace.flow_data.reserve(super_active.nodes.len());
         for node in &super_leaf_network.nodes {
-            super_node_data.push(node.data);
+            workspace.flow_data.push(node.data);
         }
-        let mut super_objective = MapEquationObjective::new(&super_node_data);
+        let mut super_objective = MapEquationObjective::new(&workspace.flow_data);
 
         let level = optimize_active_network(
             &super_leaf_network,
@@ -2011,20 +2016,26 @@ fn find_hierarchical_super_modules_fast<'g>(
         let super_codelength = level.codelength;
         let super_index_codelength = level.index_codelength;
 
-        let mut old_to_new = vec![u32::MAX; level.module_data.len()];
+        workspace
+            .super_old_to_new
+            .resize(level.module_data.len(), u32::MAX);
+        workspace.super_old_to_new.fill(u32::MAX);
         let mut next_module = 0u32;
-        let mut layer_assignment = Vec::<u32>::with_capacity(level.node_module.len());
+        workspace.super_layer_assignment.clear();
+        workspace
+            .super_layer_assignment
+            .reserve(level.node_module.len());
         for &m in &level.node_module {
             let idx = m as usize;
-            let mapped = if old_to_new[idx] == u32::MAX {
+            let mapped = if workspace.super_old_to_new[idx] == u32::MAX {
                 let mapped = next_module;
-                old_to_new[idx] = mapped;
+                workspace.super_old_to_new[idx] = mapped;
                 next_module += 1;
                 mapped
             } else {
-                old_to_new[idx]
+                workspace.super_old_to_new[idx]
             };
-            layer_assignment.push(mapped);
+            workspace.super_layer_assignment.push(mapped);
         }
 
         let num_super_modules = next_module as usize;
@@ -2073,13 +2084,18 @@ fn find_hierarchical_super_modules_fast<'g>(
             break;
         }
 
-        let mut super_module_members = vec![0u32; num_super_modules];
-        for &m in &layer_assignment {
-            super_module_members[m as usize] += 1;
+        workspace.super_module_members.clear();
+        workspace.super_module_members.resize(num_super_modules, 0);
+        for &m in &workspace.super_layer_assignment {
+            workspace.super_module_members[m as usize] += 1;
         }
-        num_non_trivial_top_modules = super_module_members.iter().filter(|&&n| n > 1).count();
+        num_non_trivial_top_modules = workspace
+            .super_module_members
+            .iter()
+            .filter(|&&n| n > 1)
+            .count();
 
-        super_assignments.push(layer_assignment);
+        super_assignments.push(workspace.super_layer_assignment.clone());
         active =
             super_active.consolidate(&level.node_module, &level.module_data, directed, workspace);
         refresh_active_data_from_leaf_network(leaf_network, &mut active, directed);
