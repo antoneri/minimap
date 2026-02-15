@@ -25,7 +25,6 @@ struct ActiveNode {
     out_span: EdgeSpan,
     in_span: EdgeSpan,
     member_span: EdgeSpan,
-    hier_id: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -155,15 +154,21 @@ struct OptimizeWorkspace {
     consolidate_out_counts: Vec<u32>,
     consolidate_in_counts: Vec<u32>,
     consolidate_stamp_gen: u32,
-    hierarchy_builder: Option<HierarchyBuilder>,
     // Reused by multilevel recursive partitioning.
     recurse_queue: Vec<u32>,
     recurse_next_queue: Vec<u32>,
     recurse_module_children: Vec<u32>,
-    recurse_term_cache: Vec<f64>,
     recurse_layers: Vec<Vec<u32>>,
     recurse_next_level_leaf_modules: Vec<u32>,
-    recurse_local_module_terms: Vec<f64>,
+    recurse_local_module_data: Vec<FlowData>,
+    recurse_sub_global_to_local: Vec<u32>,
+    recurse_sub_touched_global: Vec<u32>,
+    recurse_sub_edge_src: Vec<u32>,
+    recurse_sub_edge_dst: Vec<u32>,
+    recurse_sub_edge_flow: Vec<f64>,
+    recurse_sub_out_counts: Vec<u32>,
+    recurse_sub_in_counts: Vec<u32>,
+    recurse_sub_in_fill: Vec<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -192,46 +197,6 @@ pub struct HierarchyResult {
     pub module_children: Vec<u32>,
     // Aggregated flow data for every module in this hierarchy.
     pub module_data: Vec<FlowData>,
-}
-
-#[derive(Debug, Clone)]
-struct HierarchyBuilder {
-    leaf_count: usize,
-    module_children_offsets: Vec<u32>,
-    module_children: Vec<u32>,
-}
-
-#[allow(dead_code)]
-impl HierarchyBuilder {
-    fn new(leaf_count: usize) -> Self {
-        Self {
-            leaf_count,
-            module_children_offsets: vec![0],
-            module_children: Vec::new(),
-        }
-    }
-
-    #[inline]
-    fn module_count(&self) -> usize {
-        self.module_children_offsets.len() - 1
-    }
-
-    #[inline]
-    fn add_module(&mut self, children: &[u32]) -> u32 {
-        let module_idx = self.module_count() as u32;
-        self.module_children.extend_from_slice(children);
-        self.module_children_offsets
-            .push(self.module_children.len() as u32);
-        self.leaf_count as u32 + module_idx
-    }
-
-    #[inline]
-    fn child_range_by_global(&self, global_module_id: u32) -> std::ops::Range<usize> {
-        debug_assert!(global_module_id >= self.leaf_count as u32);
-        let module_idx = (global_module_id - self.leaf_count as u32) as usize;
-        self.module_children_offsets[module_idx] as usize
-            ..self.module_children_offsets[module_idx + 1] as usize
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -368,7 +333,6 @@ impl<'g> ActiveNetwork<'g> {
                     start: i as u32,
                     end: (i + 1) as u32,
                 },
-                hier_id: i as u32,
             });
             member_leaf.push(i as u32);
         }
@@ -451,7 +415,6 @@ impl<'g> ActiveNetwork<'g> {
                 out_span: EdgeSpan::default(),
                 in_span: EdgeSpan::default(),
                 member_span: EdgeSpan::default(),
-                hier_id: u32::MAX,
             })
             .collect();
 
@@ -477,7 +440,6 @@ impl<'g> ActiveNetwork<'g> {
             consolidate_out_counts,
             consolidate_in_counts,
             consolidate_stamp_gen,
-            hierarchy_builder,
             ..
         } = workspace;
 
@@ -540,29 +502,6 @@ impl<'g> ActiveNetwork<'g> {
             let pos = consolidate_module_offsets[src_m] + consolidate_module_fill[src_m];
             consolidate_module_nodes[pos as usize] = i as u32;
             consolidate_module_fill[src_m] += 1;
-        }
-
-        // Hierarchy sidecar for multilevel output. This is outside the move-evaluation hot path.
-        if let Some(builder) = hierarchy_builder.as_mut() {
-            let mut hier_children = Vec::<u32>::new();
-            for new_m in 0..new_n {
-                let start = consolidate_module_offsets[new_m] as usize;
-                let end = consolidate_module_offsets[new_m + 1] as usize;
-                let span_len = end - start;
-                if span_len == 1 {
-                    let only_child = consolidate_module_nodes[start] as usize;
-                    new_nodes[new_m].hier_id = self.nodes[only_child].hier_id;
-                    continue;
-                }
-
-                hier_children.clear();
-                hier_children.reserve(span_len);
-                for p in start..end {
-                    let old_node = consolidate_module_nodes[p] as usize;
-                    hier_children.push(self.nodes[old_node].hier_id);
-                }
-                new_nodes[new_m].hier_id = builder.add_module(&hier_children);
-            }
         }
 
         consolidate_dst_stamp.resize(new_n, 0);
@@ -1560,7 +1499,11 @@ fn compute_module_data_active_with_adj<A: AdjAccess>(
     modules
 }
 
-fn induced_subnetwork<'g>(active: &ActiveNetwork<'g>, members: &[u32]) -> ActiveNetwork<'g> {
+fn induced_subnetwork<'g>(
+    active: &ActiveNetwork<'g>,
+    members: &[u32],
+    workspace: &mut OptimizeWorkspace,
+) -> ActiveNetwork<'g> {
     match &active.edge_storage {
         EdgeStorage::Borrowed {
             edge_source,
@@ -1574,7 +1517,7 @@ fn induced_subnetwork<'g>(active: &ActiveNetwork<'g>, members: &[u32]) -> Active
                 edge_flow,
                 in_edge_idx,
             };
-            induced_subnetwork_with_adj(active, members, &adj)
+            induced_subnetwork_with_adj(active, members, workspace, &adj)
         }
         EdgeStorage::Owned {
             out_neighbor,
@@ -1588,7 +1531,7 @@ fn induced_subnetwork<'g>(active: &ActiveNetwork<'g>, members: &[u32]) -> Active
                 in_neighbor,
                 in_flow,
             };
-            induced_subnetwork_with_adj(active, members, &adj)
+            induced_subnetwork_with_adj(active, members, workspace, &adj)
         }
     }
 }
@@ -1596,16 +1539,34 @@ fn induced_subnetwork<'g>(active: &ActiveNetwork<'g>, members: &[u32]) -> Active
 fn induced_subnetwork_with_adj<'g, A: AdjAccess>(
     active: &ActiveNetwork<'g>,
     members: &[u32],
+    workspace: &mut OptimizeWorkspace,
     adj: &A,
 ) -> ActiveNetwork<'g> {
     let k = members.len();
-    let mut global_to_local = vec![u32::MAX; active.node_count()];
+    let OptimizeWorkspace {
+        recurse_sub_global_to_local,
+        recurse_sub_touched_global,
+        recurse_sub_edge_src,
+        recurse_sub_edge_dst,
+        recurse_sub_edge_flow,
+        recurse_sub_out_counts,
+        recurse_sub_in_counts,
+        recurse_sub_in_fill,
+        ..
+    } = workspace;
+
+    if recurse_sub_global_to_local.len() != active.node_count() {
+        recurse_sub_global_to_local.resize(active.node_count(), u32::MAX);
+    }
+    recurse_sub_touched_global.clear();
+
     let mut nodes = Vec::with_capacity(k);
     let mut member_leaf = Vec::with_capacity(k);
 
     for (local_idx, &global_idx_u32) in members.iter().enumerate() {
         let global_idx = global_idx_u32 as usize;
-        global_to_local[global_idx] = local_idx as u32;
+        recurse_sub_global_to_local[global_idx] = local_idx as u32;
+        recurse_sub_touched_global.push(global_idx_u32);
         nodes.push(ActiveNode {
             data: active.nodes[global_idx].data,
             out_span: EdgeSpan::default(),
@@ -1614,53 +1575,55 @@ fn induced_subnetwork_with_adj<'g, A: AdjAccess>(
                 start: local_idx as u32,
                 end: local_idx as u32 + 1,
             },
-            hier_id: local_idx as u32,
         });
         member_leaf.push(local_idx as u32);
     }
 
-    let mut edge_src = Vec::<u32>::new();
-    let mut edge_dst = Vec::<u32>::new();
-    let mut edge_flow = Vec::<f64>::new();
-    let mut out_counts = vec![0u32; k];
-    let mut in_counts = vec![0u32; k];
+    recurse_sub_edge_src.clear();
+    recurse_sub_edge_dst.clear();
+    recurse_sub_edge_flow.clear();
+    recurse_sub_out_counts.resize(k, 0);
+    recurse_sub_in_counts.resize(k, 0);
+    recurse_sub_out_counts.fill(0);
+    recurse_sub_in_counts.fill(0);
 
     for (local_src, &global_src_u32) in members.iter().enumerate() {
         let global_src = global_src_u32 as usize;
         for e in active.out_range(global_src) {
             let global_dst = adj.out_neighbor(e) as usize;
-            let local_dst = global_to_local[global_dst];
+            let local_dst = recurse_sub_global_to_local[global_dst];
             if local_dst == u32::MAX {
                 continue;
             }
-            edge_src.push(local_src as u32);
-            edge_dst.push(local_dst);
-            edge_flow.push(adj.out_flow(e));
-            out_counts[local_src] += 1;
-            in_counts[local_dst as usize] += 1;
+            recurse_sub_edge_src.push(local_src as u32);
+            recurse_sub_edge_dst.push(local_dst);
+            recurse_sub_edge_flow.push(adj.out_flow(e));
+            recurse_sub_out_counts[local_src] += 1;
+            recurse_sub_in_counts[local_dst as usize] += 1;
         }
     }
 
-    let out_offsets = ActiveNetwork::prefix_offsets(&out_counts);
-    let in_offsets = ActiveNetwork::prefix_offsets(&in_counts);
-    let m = edge_src.len();
+    let out_offsets = ActiveNetwork::prefix_offsets(recurse_sub_out_counts);
+    let in_offsets = ActiveNetwork::prefix_offsets(recurse_sub_in_counts);
+    let m = recurse_sub_edge_src.len();
 
     let mut out_neighbor = vec![0u32; m];
     let mut out_flow = vec![0.0f64; m];
     for i in 0..m {
-        out_neighbor[i] = edge_dst[i];
-        out_flow[i] = edge_flow[i];
+        out_neighbor[i] = recurse_sub_edge_dst[i];
+        out_flow[i] = recurse_sub_edge_flow[i];
     }
 
     let mut in_neighbor = vec![0u32; m];
     let mut in_flow = vec![0.0f64; m];
-    let mut in_fill = vec![0u32; k];
+    recurse_sub_in_fill.resize(k, 0);
+    recurse_sub_in_fill.fill(0);
     for i in 0..m {
-        let dst = edge_dst[i] as usize;
-        let pos = in_offsets[dst] + in_fill[dst];
-        in_neighbor[pos as usize] = edge_src[i];
-        in_flow[pos as usize] = edge_flow[i];
-        in_fill[dst] += 1;
+        let dst = recurse_sub_edge_dst[i] as usize;
+        let pos = in_offsets[dst] + recurse_sub_in_fill[dst];
+        in_neighbor[pos as usize] = recurse_sub_edge_src[i];
+        in_flow[pos as usize] = recurse_sub_edge_flow[i];
+        recurse_sub_in_fill[dst] += 1;
     }
 
     for i in 0..k {
@@ -1673,6 +1636,11 @@ fn induced_subnetwork_with_adj<'g, A: AdjAccess>(
             end: in_offsets[i + 1],
         };
     }
+
+    for &global_idx in recurse_sub_touched_global.iter() {
+        recurse_sub_global_to_local[global_idx as usize] = u32::MAX;
+    }
+    recurse_sub_touched_global.clear();
 
     ActiveNetwork {
         nodes,
@@ -1692,6 +1660,7 @@ fn coarse_tune<'g>(
     objective: &mut MapEquationObjective,
     rng: &mut impl TrialRng,
     directed: bool,
+    allow_non_improving_hierarchy_levels: bool,
     workspace: &mut OptimizeWorkspace,
 ) -> u32 {
     if top_network.nodes.len() <= 1 {
@@ -1717,7 +1686,7 @@ fn coarse_tune<'g>(
             continue;
         }
 
-        let sub_active = induced_subnetwork(leaf_network, members);
+        let sub_active = induced_subnetwork(leaf_network, members, workspace);
         let mut sub_node_data = Vec::with_capacity(sub_active.nodes.len());
         for node in &sub_active.nodes {
             sub_node_data.push(node.data);
@@ -1729,7 +1698,7 @@ fn coarse_tune<'g>(
             rng,
             directed,
             false,
-            false,
+            allow_non_improving_hierarchy_levels,
             workspace,
         );
         let sub_local_assignment = assignment_from_top_network(&sub_top, sub_active.node_count());
@@ -1797,6 +1766,7 @@ fn tune_top_modules<'g>(
     rng: &mut impl TrialRng,
     directed: bool,
     one_level_codelength: f64,
+    allow_non_improving_hierarchy_levels: bool,
     workspace: &mut OptimizeWorkspace,
 ) {
     let mut old_codelength = active_modules_codelength(top_network, objective, workspace);
@@ -1819,7 +1789,7 @@ fn tune_top_modules<'g>(
                     objective,
                     rng,
                     directed,
-                    false,
+                    allow_non_improving_hierarchy_levels,
                     workspace,
                 );
             }
@@ -1831,6 +1801,7 @@ fn tune_top_modules<'g>(
                 objective,
                 rng,
                 directed,
+                allow_non_improving_hierarchy_levels,
                 workspace,
             );
             if num_effective_loops > 0 {
@@ -1839,7 +1810,7 @@ fn tune_top_modules<'g>(
                     objective,
                     rng,
                     directed,
-                    false,
+                    allow_non_improving_hierarchy_levels,
                     workspace,
                 );
             }
@@ -1869,6 +1840,7 @@ fn optimize_two_level_from_leaf<'g>(
     directed: bool,
     one_level_codelength: f64,
     lock_first_loop: bool,
+    allow_non_improving_hierarchy_levels: bool,
     workspace: &mut OptimizeWorkspace,
 ) -> ActiveNetwork<'g> {
     let mut top_network = find_top_modules_repeatedly_from_leaf(
@@ -1877,7 +1849,7 @@ fn optimize_two_level_from_leaf<'g>(
         rng,
         directed,
         lock_first_loop,
-        false,
+        allow_non_improving_hierarchy_levels,
         workspace,
     );
     tune_top_modules(
@@ -1887,6 +1859,7 @@ fn optimize_two_level_from_leaf<'g>(
         rng,
         directed,
         one_level_codelength,
+        allow_non_improving_hierarchy_levels,
         workspace,
     );
     top_network
@@ -1932,6 +1905,7 @@ fn find_hierarchical_super_modules_fast<'g>(
             directed,
             super_one_level_codelength,
             false,
+            true,
             workspace,
         );
 
@@ -2311,46 +2285,6 @@ fn hierarchy_codelength(graph: &Graph, hier: &HierarchyResult) -> f64 {
     codelength
 }
 
-fn hierarchy_codelength_active(active: &ActiveNetwork<'_>, hier: &HierarchyResult) -> f64 {
-    let leaf_base = active.node_count() as u32;
-    let mut root_total = 0.0f64;
-    let mut root_child_log = 0.0f64;
-
-    for &top in &hier.top_modules {
-        let w = hier.module_data[top as usize].enter_flow;
-        root_total += w;
-        root_child_log += plogp(w);
-    }
-    for leaf in 0..active.node_count() {
-        if hier.leaf_paths[leaf].is_empty() {
-            let w = active.nodes[leaf].data.flow;
-            root_total += w;
-            root_child_log += plogp(w);
-        }
-    }
-
-    let mut codelength = plogp(root_total) - root_child_log;
-    for m in 0..hier.module_parent.len() {
-        let mut child_total = 0.0f64;
-        let mut child_log = 0.0f64;
-        let range =
-            hier.module_children_offsets[m] as usize..hier.module_children_offsets[m + 1] as usize;
-        for &child in hier.module_children[range].iter() {
-            let w = if child < leaf_base {
-                active.nodes[child as usize].data.flow
-            } else {
-                hier.module_data[(child - leaf_base) as usize].enter_flow
-            };
-            child_total += w;
-            child_log += plogp(w);
-        }
-        let exit = hier.module_data[m].exit_flow;
-        codelength += plogp(exit + child_total) - plogp(exit) - child_log;
-    }
-
-    codelength
-}
-
 fn module_term_codelength_graph(graph: &Graph, hier: &HierarchyResult, module_idx: usize) -> f64 {
     let leaf_base = graph.node_count() as u32;
     let mut child_total = 0.0f64;
@@ -2370,188 +2304,291 @@ fn module_term_codelength_graph(graph: &Graph, hier: &HierarchyResult, module_id
     plogp(exit + child_total) - plogp(exit) - child_log
 }
 
-fn module_term_codelength_active(
-    active: &ActiveNetwork<'_>,
-    hier: &HierarchyResult,
-    module_idx: usize,
+#[inline]
+fn split_term_validation_limit() -> usize {
+    if std::env::var_os("MINIMAP_VALIDATE_SPLIT_TERM").is_none() {
+        return 0;
+    }
+    if let Some(v) = std::env::var_os("MINIMAP_VALIDATE_SPLIT_TERM_N") {
+        if let Ok(s) = v.into_string() {
+            if let Ok(n) = s.parse::<usize>() {
+                return n.max(1);
+            }
+        }
+    }
+    16
+}
+
+fn local_module_term_codelength_active(
+    leaf_network: &ActiveNetwork<'_>,
+    parent_members: &[u32],
+    local_hierarchy: &HierarchyResult,
+    local_module_data: &[FlowData],
+    local_module_idx: usize,
 ) -> f64 {
-    let leaf_base = active.node_count() as u32;
+    let local_leaf_base = parent_members.len() as u32;
     let mut child_total = 0.0f64;
     let mut child_log = 0.0f64;
-    let range = hier.module_children_offsets[module_idx] as usize
-        ..hier.module_children_offsets[module_idx + 1] as usize;
-    for &child in hier.module_children[range].iter() {
-        let w = if child < leaf_base {
-            active.nodes[child as usize].data.flow
+    let range = local_hierarchy.module_children_offsets[local_module_idx] as usize
+        ..local_hierarchy.module_children_offsets[local_module_idx + 1] as usize;
+    for &child in local_hierarchy.module_children[range].iter() {
+        let w = if child < local_leaf_base {
+            let global_leaf = parent_members[child as usize] as usize;
+            leaf_network.nodes[global_leaf].data.flow
         } else {
-            hier.module_data[(child - leaf_base) as usize].enter_flow
+            local_module_data[(child - local_leaf_base) as usize].enter_flow
         };
         child_total += w;
         child_log += plogp(w);
     }
-    let exit = hier.module_data[module_idx].exit_flow;
+    let exit = local_module_data[local_module_idx].exit_flow;
     plogp(exit + child_total) - plogp(exit) - child_log
 }
 
-#[allow(dead_code)]
-fn build_hierarchy_result(
-    graph: &Graph,
-    active: &ActiveNetwork<'_>,
-    builder: &HierarchyBuilder,
+fn candidate_split_local_codelength(
+    leaf_network: &ActiveNetwork<'_>,
+    parent_members: &[u32],
+    sub_hierarchy: &HierarchyResult,
+    parent_exit_flow: f64,
     directed: bool,
-) -> HierarchyResult {
-    let leaf_count = graph.node_count();
-    let leaf_base = leaf_count as u32;
-    let module_count_total = builder.module_count();
-    let mut module_seen = vec![false; module_count_total];
-    let mut stack: Vec<u32> = Vec::with_capacity(active.nodes.len());
+    workspace: &mut OptimizeWorkspace,
+) -> f64 {
+    match &leaf_network.edge_storage {
+        EdgeStorage::Borrowed {
+            edge_source,
+            edge_target,
+            edge_flow,
+            in_edge_idx,
+        } => {
+            let adj = BorrowedAdj {
+                edge_source,
+                edge_target,
+                edge_flow,
+                in_edge_idx,
+            };
+            candidate_split_local_codelength_with_adj(
+                leaf_network,
+                parent_members,
+                sub_hierarchy,
+                parent_exit_flow,
+                directed,
+                workspace,
+                &adj,
+            )
+        }
+        EdgeStorage::Owned {
+            out_neighbor,
+            out_flow,
+            in_neighbor,
+            in_flow,
+        } => {
+            let adj = OwnedAdj {
+                out_neighbor,
+                out_flow,
+                in_neighbor,
+                in_flow,
+            };
+            candidate_split_local_codelength_with_adj(
+                leaf_network,
+                parent_members,
+                sub_hierarchy,
+                parent_exit_flow,
+                directed,
+                workspace,
+                &adj,
+            )
+        }
+    }
+}
 
-    for node in &active.nodes {
-        stack.push(node.hier_id);
+fn candidate_split_local_codelength_with_adj<A: AdjAccess>(
+    leaf_network: &ActiveNetwork<'_>,
+    parent_members: &[u32],
+    sub_hierarchy: &HierarchyResult,
+    parent_exit_flow: f64,
+    directed: bool,
+    workspace: &mut OptimizeWorkspace,
+    adj: &A,
+) -> f64 {
+    let local_module_count = sub_hierarchy.module_parent.len();
+    if local_module_count == 0 {
+        return f64::INFINITY;
     }
 
-    while let Some(gid) = stack.pop() {
-        if gid < leaf_base {
-            continue;
-        }
-        let m = (gid - leaf_base) as usize;
-        if m >= module_count_total || module_seen[m] {
-            continue;
-        }
-        module_seen[m] = true;
-        let range = builder.child_range_by_global(gid);
-        for &child in builder.module_children[range].iter() {
-            stack.push(child);
-        }
+    let OptimizeWorkspace {
+        recurse_sub_global_to_local,
+        recurse_sub_touched_global,
+        recurse_local_module_data,
+        ..
+    } = workspace;
+
+    if recurse_sub_global_to_local.len() != leaf_network.node_count() {
+        recurse_sub_global_to_local.resize(leaf_network.node_count(), u32::MAX);
+    }
+    recurse_sub_touched_global.clear();
+    for (local_leaf, &global_leaf_u32) in parent_members.iter().enumerate() {
+        recurse_sub_global_to_local[global_leaf_u32 as usize] = local_leaf as u32;
+        recurse_sub_touched_global.push(global_leaf_u32);
     }
 
-    let mut global_to_local = vec![u32::MAX; module_count_total];
-    let mut local_to_global = Vec::<u32>::new();
-    for (m, seen) in module_seen.iter().copied().enumerate() {
-        if seen {
-            global_to_local[m] = local_to_global.len() as u32;
-            local_to_global.push(leaf_base + m as u32);
-        }
+    recurse_local_module_data.clear();
+    recurse_local_module_data.extend_from_slice(&sub_hierarchy.module_data);
+    for d in recurse_local_module_data.iter_mut() {
+        d.enter_flow = 0.0;
+        d.exit_flow = 0.0;
     }
 
-    let module_count = local_to_global.len();
-    let mut module_parent = vec![u32::MAX; module_count];
-    let mut leaf_parent = vec![u32::MAX; leaf_count];
-    let mut module_children_raw: Vec<Vec<u32>> = vec![Vec::new(); module_count];
+    for (local_s, &global_s_u32) in parent_members.iter().enumerate() {
+        let ps = &sub_hierarchy.leaf_paths[local_s];
+        debug_assert!(
+            !ps.is_empty(),
+            "leaf path unexpectedly empty for local source leaf {}",
+            local_s
+        );
 
-    for (local_m, &global_m) in local_to_global.iter().enumerate() {
-        let range = builder.child_range_by_global(global_m);
-        let children = &builder.module_children[range];
-        let mut out_children = Vec::with_capacity(children.len());
-        for &child in children {
-            if child < leaf_base {
-                leaf_parent[child as usize] = local_m as u32;
-                out_children.push(child);
+        let source = global_s_u32 as usize;
+        for e in leaf_network.out_range(source) {
+            let target = adj.out_neighbor(e) as usize;
+            let local_t = recurse_sub_global_to_local[target];
+            let f = adj.out_flow(e);
+
+            if local_t != u32::MAX {
+                let pt = &sub_hierarchy.leaf_paths[local_t as usize];
+                let lcp = common_prefix_len(ps, pt);
+                if directed {
+                    for &m in &ps[lcp..] {
+                        recurse_local_module_data[m as usize].exit_flow += f;
+                    }
+                    for &m in &pt[lcp..] {
+                        recurse_local_module_data[m as usize].enter_flow += f;
+                    }
+                } else {
+                    let h = f / 2.0;
+                    for &m in &ps[lcp..] {
+                        let md = &mut recurse_local_module_data[m as usize];
+                        md.exit_flow += h;
+                        md.enter_flow += h;
+                    }
+                    for &m in &pt[lcp..] {
+                        let md = &mut recurse_local_module_data[m as usize];
+                        md.exit_flow += h;
+                        md.enter_flow += h;
+                    }
+                }
+            } else if directed {
+                for &m in ps {
+                    recurse_local_module_data[m as usize].exit_flow += f;
+                }
             } else {
-                let child_global_idx = (child - leaf_base) as usize;
-                let child_local = global_to_local[child_global_idx];
-                if child_local != u32::MAX {
-                    module_parent[child_local as usize] = local_m as u32;
-                    out_children.push(leaf_base + child_local);
+                let h = f / 2.0;
+                for &m in ps {
+                    let md = &mut recurse_local_module_data[m as usize];
+                    md.exit_flow += h;
+                    md.enter_flow += h;
                 }
             }
         }
-        module_children_raw[local_m] = out_children;
     }
 
-    let mut top_modules = Vec::<u32>::new();
-    let mut seen_top = vec![false; module_count];
-    for node in &active.nodes {
-        let gid = node.hier_id;
-        if gid < leaf_base {
-            continue;
-        }
-        let global_idx = (gid - leaf_base) as usize;
-        if global_idx >= global_to_local.len() {
-            continue;
-        }
-        let local_m = global_to_local[global_idx];
-        if local_m != u32::MAX && !seen_top[local_m as usize] {
-            seen_top[local_m as usize] = true;
-            top_modules.push(local_m);
-        }
-    }
+    for (local_t, &global_t_u32) in parent_members.iter().enumerate() {
+        let pt = &sub_hierarchy.leaf_paths[local_t];
+        debug_assert!(
+            !pt.is_empty(),
+            "leaf path unexpectedly empty for local target leaf {}",
+            local_t
+        );
 
-    let mut module_children_offsets = Vec::with_capacity(module_count + 1);
-    module_children_offsets.push(0);
-    let mut module_children = Vec::<u32>::new();
-    for children in &module_children_raw {
-        module_children.extend_from_slice(children);
-        module_children_offsets.push(module_children.len() as u32);
-    }
-
-    let mut leaf_paths: Vec<Vec<u32>> = vec![Vec::new(); leaf_count];
-    let mut max_depth = 0usize;
-    for leaf in 0..leaf_count {
-        let mut p = leaf_parent[leaf];
-        if p == u32::MAX {
-            continue;
-        }
-        let mut rev = Vec::<u32>::new();
-        while p != u32::MAX {
-            rev.push(p);
-            p = module_parent[p as usize];
-        }
-        rev.reverse();
-        max_depth = max_depth.max(rev.len());
-        leaf_paths[leaf] = rev;
-    }
-
-    let levels = (max_depth as u32).saturating_add(1);
-    let mut module_data = vec![FlowData::default(); module_count];
-
-    for (leaf, path) in leaf_paths.iter().enumerate() {
-        let flow = graph.node_data[leaf].flow;
-        for &m in path {
-            module_data[m as usize].flow += flow;
-        }
-    }
-
-    for e in 0..graph.edge_count() {
-        let s = graph.edge_source[e] as usize;
-        let t = graph.edge_target[e] as usize;
-        if s == t {
-            continue;
-        }
-        let ps = &leaf_paths[s];
-        let pt = &leaf_paths[t];
-        let lcp = common_prefix_len(ps, pt);
-        let f = graph.edge_flow[e];
-        if directed {
-            for &m in &ps[lcp..] {
-                module_data[m as usize].exit_flow += f;
+        let target = global_t_u32 as usize;
+        for e in leaf_network.in_range(target) {
+            let source = adj.in_neighbor(e) as usize;
+            if recurse_sub_global_to_local[source] != u32::MAX {
+                continue;
             }
-            for &m in &pt[lcp..] {
-                module_data[m as usize].enter_flow += f;
-            }
-        } else {
-            let h = f / 2.0;
-            for &m in &ps[lcp..] {
-                let md = &mut module_data[m as usize];
-                md.exit_flow += h;
-                md.enter_flow += h;
-            }
-            for &m in &pt[lcp..] {
-                let md = &mut module_data[m as usize];
-                md.exit_flow += h;
-                md.enter_flow += h;
+            let f = adj.in_flow(e);
+            if directed {
+                for &m in pt {
+                    recurse_local_module_data[m as usize].enter_flow += f;
+                }
+            } else {
+                let h = f / 2.0;
+                for &m in pt {
+                    let md = &mut recurse_local_module_data[m as usize];
+                    md.exit_flow += h;
+                    md.enter_flow += h;
+                }
             }
         }
     }
 
-    HierarchyResult {
-        leaf_paths,
-        top_modules,
-        levels,
-        module_parent,
-        module_children_offsets,
-        module_children,
-        module_data,
+    for &global_leaf_u32 in recurse_sub_touched_global.iter() {
+        recurse_sub_global_to_local[global_leaf_u32 as usize] = u32::MAX;
+    }
+    recurse_sub_touched_global.clear();
+
+    let mut parent_child_total = 0.0f64;
+    let mut parent_child_log = 0.0f64;
+    for &top in sub_hierarchy.top_modules.iter() {
+        let w = recurse_local_module_data[top as usize].enter_flow;
+        parent_child_total += w;
+        parent_child_log += plogp(w);
+    }
+    let parent_term =
+        plogp(parent_exit_flow + parent_child_total) - plogp(parent_exit_flow) - parent_child_log;
+
+    let mut inserted_terms = 0.0f64;
+    for local_module_idx in 0..local_module_count {
+        inserted_terms += local_module_term_codelength_active(
+            leaf_network,
+            parent_members,
+            sub_hierarchy,
+            recurse_local_module_data,
+            local_module_idx,
+        );
+    }
+
+    parent_term + inserted_terms
+}
+
+fn validate_fast_split_local_codelength(
+    graph: &Graph,
+    hierarchy: &DynamicHierarchy,
+    module_idx: u32,
+    sub_hierarchy: &HierarchyResult,
+    parent_members: &[u32],
+    directed: bool,
+    fast_local_codelength: f64,
+) {
+    let old_module_count = hierarchy.module_count();
+    let mut candidate_hierarchy = hierarchy.clone();
+    let mut next_level_leaf_modules = Vec::<u32>::new();
+    graft_local_hierarchy_under_module(
+        &mut candidate_hierarchy,
+        module_idx,
+        sub_hierarchy,
+        parent_members,
+        &mut next_level_leaf_modules,
+    );
+    let candidate_result = dynamic_hierarchy_to_result_ref(graph, &candidate_hierarchy, directed);
+    if module_idx as usize >= candidate_result.module_parent.len() {
+        panic!(
+            "split term validator failed: module {} missing after graft",
+            module_idx
+        );
+    }
+
+    let mut slow_local_codelength =
+        module_term_codelength_graph(graph, &candidate_result, module_idx as usize);
+    for added_module_idx in old_module_count..candidate_hierarchy.module_count() {
+        slow_local_codelength +=
+            module_term_codelength_graph(graph, &candidate_result, added_module_idx);
+    }
+
+    let diff = (slow_local_codelength - fast_local_codelength).abs();
+    if diff > 1e-9 {
+        panic!(
+            "split local codelength validator mismatch for module {}: fast={} slow={} diff={}",
+            module_idx, fast_local_codelength, slow_local_codelength, diff
+        );
     }
 }
 
@@ -2905,15 +2942,6 @@ fn is_leaf_module_dynamic(hierarchy: &DynamicHierarchy, module_idx: u32) -> bool
         .all(|&child| child < leaf_base)
 }
 
-#[inline]
-fn set_cached_module_term(term_cache: &mut Vec<f64>, module_idx: u32, value: f64) {
-    let idx = module_idx as usize;
-    if idx >= term_cache.len() {
-        term_cache.resize(idx + 1, 0.0);
-    }
-    term_cache[idx] = value;
-}
-
 fn copy_local_module_into_dynamic(
     hierarchy: &mut DynamicHierarchy,
     parent_global: u32,
@@ -2921,8 +2949,6 @@ fn copy_local_module_into_dynamic(
     local_hier: &HierarchyResult,
     local_leaf_to_global_leaf: &[u32],
     next_level_leaf_modules: &mut Vec<u32>,
-    term_cache: &mut Vec<f64>,
-    local_module_terms: &[f64],
 ) -> u32 {
     let global_module = hierarchy.add_module_with_children(parent_global, &[]);
     let local_leaf_base = local_leaf_to_global_leaf.len() as u32;
@@ -2944,8 +2970,6 @@ fn copy_local_module_into_dynamic(
                 local_hier,
                 local_leaf_to_global_leaf,
                 next_level_leaf_modules,
-                term_cache,
-                local_module_terms,
             );
             children.push(hierarchy.leaf_base() + global_child_module);
         }
@@ -2955,11 +2979,6 @@ fn copy_local_module_into_dynamic(
     if all_children_are_leaves && children.len() > 1 {
         next_level_leaf_modules.push(global_module);
     }
-    set_cached_module_term(
-        term_cache,
-        global_module,
-        local_module_terms[local_module_idx as usize],
-    );
 
     global_module
 }
@@ -2970,8 +2989,6 @@ fn graft_local_hierarchy_under_module(
     local_hier: &HierarchyResult,
     local_leaf_to_global_leaf: &[u32],
     next_level_leaf_modules: &mut Vec<u32>,
-    term_cache: &mut Vec<f64>,
-    local_module_terms: &[f64],
 ) {
     next_level_leaf_modules.clear();
     let mut new_children = Vec::<u32>::with_capacity(local_hier.top_modules.len());
@@ -2985,8 +3002,6 @@ fn graft_local_hierarchy_under_module(
             local_hier,
             local_leaf_to_global_leaf,
             next_level_leaf_modules,
-            term_cache,
-            local_module_terms,
         );
         new_children.push(leaf_base + global_top_module);
     }
@@ -3009,19 +3024,11 @@ fn recursive_partition_bottom_modules<'g>(
         }
     }
 
-    // Compute baseline terms once; new modules added after accepted splits update this cache incrementally.
-    workspace.recurse_term_cache.clear();
-    let snapshot = dynamic_hierarchy_to_result_ref(graph, hierarchy, directed);
-    workspace
-        .recurse_term_cache
-        .reserve(snapshot.module_parent.len());
-    for module_idx in 0..snapshot.module_parent.len() {
-        workspace
-            .recurse_term_cache
-            .push(module_term_codelength_graph(graph, &snapshot, module_idx));
-    }
+    let mut validate_remaining = split_term_validation_limit();
 
     while !workspace.recurse_queue.is_empty() {
+        // Keep one stable snapshot per queue level, matching Infomap's queue processing semantics.
+        let snapshot = dynamic_hierarchy_to_result_ref(graph, hierarchy, directed);
         workspace.recurse_next_queue.clear();
         let queue_len = workspace.recurse_queue.len();
 
@@ -3041,14 +3048,15 @@ fn recursive_partition_bottom_modules<'g>(
             if workspace.recurse_module_children.len() <= 2 {
                 continue;
             }
+            let parent_members = workspace.recurse_module_children.clone();
 
-            let old_module_codelength = match workspace.recurse_term_cache.get(module_idx as usize)
-            {
-                Some(value) => *value,
-                None => continue,
-            };
+            if module_idx as usize >= snapshot.module_parent.len() {
+                continue;
+            }
+            let old_module_codelength =
+                module_term_codelength_graph(graph, &snapshot, module_idx as usize);
 
-            let sub_active = induced_subnetwork(leaf_network, &workspace.recurse_module_children);
+            let sub_active = induced_subnetwork(leaf_network, &parent_members, workspace);
             if sub_active.node_count() <= 2 {
                 continue;
             }
@@ -3065,6 +3073,7 @@ fn recursive_partition_bottom_modules<'g>(
                 rng,
                 directed,
                 sub_one_level,
+                true,
                 true,
                 workspace,
             );
@@ -3091,28 +3100,35 @@ fn recursive_partition_bottom_modules<'g>(
             );
             let num_submodules = sub_hierarchy.top_modules.len();
             let trivial_sub_partition =
-                num_submodules <= 1 || num_submodules >= workspace.recurse_module_children.len();
+                num_submodules <= 1 || num_submodules >= parent_members.len();
             if trivial_sub_partition {
                 continue;
             }
 
-            let sub_codelength = hierarchy_codelength_active(&sub_active, &sub_hierarchy);
-            if sub_codelength >= old_module_codelength - MIN_CODELENGTH_IMPROVEMENT {
-                continue;
+            // Exact local split scoring in full graph context without cloning/materializing hierarchy.
+            let parent_exit_flow = snapshot.module_data[module_idx as usize].exit_flow;
+            let new_local_codelength = candidate_split_local_codelength(
+                leaf_network,
+                &parent_members,
+                &sub_hierarchy,
+                parent_exit_flow,
+                directed,
+                workspace,
+            );
+            if validate_remaining > 0 {
+                validate_fast_split_local_codelength(
+                    graph,
+                    hierarchy,
+                    module_idx,
+                    &sub_hierarchy,
+                    &parent_members,
+                    directed,
+                    new_local_codelength,
+                );
+                validate_remaining -= 1;
             }
-
-            workspace.recurse_local_module_terms.clear();
-            workspace
-                .recurse_local_module_terms
-                .reserve(sub_hierarchy.module_parent.len());
-            for local_module_idx in 0..sub_hierarchy.module_parent.len() {
-                workspace
-                    .recurse_local_module_terms
-                    .push(module_term_codelength_active(
-                        &sub_active,
-                        &sub_hierarchy,
-                        local_module_idx,
-                    ));
+            if new_local_codelength >= old_module_codelength - MIN_CODELENGTH_IMPROVEMENT {
+                continue;
             }
 
             workspace.recurse_next_level_leaf_modules.clear();
@@ -3120,10 +3136,8 @@ fn recursive_partition_bottom_modules<'g>(
                 hierarchy,
                 module_idx,
                 &sub_hierarchy,
-                &workspace.recurse_module_children,
+                &parent_members,
                 &mut workspace.recurse_next_level_leaf_modules,
-                &mut workspace.recurse_term_cache,
-                &workspace.recurse_local_module_terms,
             );
             workspace
                 .recurse_next_queue
@@ -3156,6 +3170,7 @@ fn single_trial(
         directed,
         one_level,
         true,
+        multilevel,
         &mut workspace,
     );
 
