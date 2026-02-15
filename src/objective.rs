@@ -9,6 +9,7 @@ pub struct DeltaFlow {
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct MoveDeltaContext {
+    // Cached old-module terms reused across candidate destinations for one moved node.
     de_old: f64,
     current_flow: f64,
     current_enter_flow: f64,

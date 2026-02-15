@@ -24,12 +24,14 @@ struct ActiveNode {
 
 #[derive(Debug, Clone)]
 enum EdgeStorage<'g> {
+    // Unlike Infomap's linked structures, level 0 borrows graph CSR directly.
     Borrowed {
         edge_source: &'g [u32],
         edge_target: &'g [u32],
         edge_flow: &'g [f64],
         in_edge_idx: &'g [u32],
     },
+    // After consolidation, we keep compact owned arrays for cache-friendly traversal.
     Owned {
         out_neighbor: Vec<u32>,
         out_flow: Vec<f64>,
@@ -41,6 +43,7 @@ enum EdgeStorage<'g> {
 #[derive(Debug, Clone)]
 struct ActiveNetwork<'g> {
     nodes: Vec<ActiveNode>,
+    // Flat member pool with per-module spans replaces per-node Vec<Vec<...>> style storage.
     member_leaf: Vec<u32>,
     edge_storage: EdgeStorage<'g>,
 }
@@ -55,6 +58,7 @@ struct OptimizeLevelResult {
 
 #[derive(Debug, Default)]
 struct OptimizeWorkspace {
+    // Reused across loops/trials to avoid allocator churn in the hot optimizer path.
     node_order: Vec<u32>,
     redirect: Vec<u32>,
     touched_modules: Vec<u32>,
@@ -205,6 +209,7 @@ impl<'g> ActiveNetwork<'g> {
         Self {
             nodes,
             member_leaf,
+            // Level 0 keeps zero-copy adjacency references into the parsed graph.
             edge_storage: EdgeStorage::Borrowed {
                 edge_source: &graph.edge_source,
                 edge_target: &graph.edge_target,
@@ -266,6 +271,7 @@ impl<'g> ActiveNetwork<'g> {
             ..
         } = workspace;
 
+        // Rebuild module membership as contiguous ranges to keep hierarchy data cache-local.
         consolidate_member_counts.resize(new_n, 0);
         consolidate_member_counts.fill(0);
         for i in 0..n {
@@ -354,6 +360,7 @@ impl<'g> ActiveNetwork<'g> {
                     }
 
                     let flow = self.out_flow_at(e);
+                    // Sparse stamp accumulator: same semantics as map aggregation, lower overhead.
                     if consolidate_dst_stamp[dst_m] != stamp_gen {
                         consolidate_dst_stamp[dst_m] = stamp_gen;
                         consolidate_dst_flow[dst_m] = flow;
@@ -406,6 +413,7 @@ impl<'g> ActiveNetwork<'g> {
             out_flow[idx] = consolidate_edge_flow[idx];
         }
 
+        // In-edges are rebuilt from out-edge order so traversal stays deterministic.
         for idx in 0..total_edges {
             let src_m = consolidate_edge_src[idx];
             let dst_m = consolidate_edge_dst[idx];
@@ -685,6 +693,7 @@ fn try_move_each_node_into_best_module(
             delta_exit: cand_delta_exit[old_idx],
             delta_enter: cand_delta_enter[old_idx],
         };
+        // Precompute old-module terms once; candidate loop only varies the destination module.
         let move_context =
             objective.prepare_move_context(&active.nodes[node_idx].data, &old_delta, module_data);
 
@@ -1267,6 +1276,7 @@ fn collect_trials_with_rng<R: TrialRng + Send>(
     worker_threads: usize,
     make_rng: fn(u32) -> R,
 ) -> Vec<(u32, TrialResult)> {
+    // Minimap parallelizes outer trials; each trial run remains single-thread deterministic.
     if worker_threads == 1 {
         let mut out = Vec::with_capacity(trials as usize);
         for trial_index in 0..trials {
