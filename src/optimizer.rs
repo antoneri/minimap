@@ -179,7 +179,6 @@ struct OptimizeWorkspace {
     recurse_queue: Vec<u32>,
     recurse_next_queue: Vec<u32>,
     recurse_module_children: Vec<u32>,
-    recurse_layers: Vec<Vec<u32>>,
     recurse_next_level_leaf_modules: Vec<u32>,
     recurse_local_module_data: Vec<FlowData>,
     recurse_sub_global_to_local: Vec<u32>,
@@ -2899,6 +2898,44 @@ fn build_hierarchy_from_layers(
     }
 }
 
+fn flatten_hierarchy_to_top_modules(
+    graph: &Graph,
+    hierarchy: &HierarchyResult,
+    directed: bool,
+) -> HierarchyResult {
+    if hierarchy.levels <= 2 {
+        return hierarchy.clone();
+    }
+
+    let leaf_count = graph.node_count();
+    let mut top_old_to_new = vec![u32::MAX; hierarchy.module_parent.len()];
+    let mut next_top = 0u32;
+    for &top in &hierarchy.top_modules {
+        top_old_to_new[top as usize] = next_top;
+        next_top += 1;
+    }
+
+    let mut assignment = vec![u32::MAX; leaf_count];
+    for (leaf, slot) in assignment.iter_mut().enumerate() {
+        if hierarchy.leaf_paths[leaf].is_empty() {
+            *slot = next_top;
+            next_top += 1;
+            continue;
+        }
+        let top = hierarchy.leaf_paths[leaf][0] as usize;
+        let mapped = top_old_to_new[top];
+        if mapped == u32::MAX {
+            top_old_to_new[top] = next_top;
+            *slot = next_top;
+            next_top += 1;
+        } else {
+            *slot = mapped;
+        }
+    }
+
+    build_hierarchy_from_layers(graph, std::slice::from_ref(&assignment), directed)
+}
+
 fn build_hierarchy_from_layers_active(
     active: &ActiveNetwork<'_>,
     layers: &[Vec<u32>],
@@ -3203,11 +3240,12 @@ fn recursive_partition_bottom_modules<'g>(
                 continue;
             }
 
-            let mut sub_node_data = Vec::with_capacity(sub_active.nodes.len());
+            workspace.flow_data.clear();
+            workspace.flow_data.reserve(sub_active.nodes.len());
             for node in &sub_active.nodes {
-                sub_node_data.push(node.data);
+                workspace.flow_data.push(node.data);
             }
-            let mut sub_objective = MapEquationObjective::new(&sub_node_data);
+            let mut sub_objective = MapEquationObjective::new(&workspace.flow_data);
             let sub_one_level = active_one_level_codelength(&sub_active);
             let sub_top = optimize_two_level_from_leaf(
                 &sub_active,
@@ -3215,12 +3253,10 @@ fn recursive_partition_bottom_modules<'g>(
                 rng,
                 directed,
                 sub_one_level,
-                true,
-                true,
+                directed,
+                directed,
                 workspace,
             );
-            let base_assignment = assignment_from_top_network(&sub_top, sub_active.node_count());
-
             let super_result = find_hierarchical_super_modules_fast(
                 &sub_active,
                 &sub_top,
@@ -3229,23 +3265,22 @@ fn recursive_partition_bottom_modules<'g>(
                 workspace,
                 directed,
             );
-            let super_assignments = super_result.super_assignments;
-
-            workspace.recurse_layers.clear();
-            workspace.recurse_layers.push(base_assignment);
-            workspace.recurse_layers.extend(super_assignments);
-
-            let sub_hierarchy = build_hierarchy_from_layers_active(
-                &sub_active,
-                &workspace.recurse_layers,
-                directed,
-            );
-            let num_submodules = sub_hierarchy.top_modules.len();
+            let top_assignment =
+                assignment_from_top_network(&super_result.active_top, sub_active.node_count());
+            let num_submodules = assignment_module_count(&top_assignment);
             let trivial_sub_partition =
-                num_submodules <= 1 || num_submodules >= parent_members.len();
+                num_submodules <= 1 || num_submodules == parent_members.len();
             if trivial_sub_partition {
                 continue;
             }
+
+            // Match Infomap recursive partition behavior with `onlySuperModules`:
+            // keep only top-level submodules here and defer deeper recursion to next queue levels.
+            let sub_hierarchy = build_hierarchy_from_layers_active(
+                &sub_active,
+                std::slice::from_ref(&top_assignment),
+                directed,
+            );
 
             // Exact local split scoring in full graph context without cloning/materializing hierarchy.
             let parent_exit_flow = snapshot.module_data[module_idx as usize].exit_flow;
@@ -3347,7 +3382,10 @@ fn single_trial(
             layers.push(base);
             layers.extend(super_assignments);
         }
-        let base_hierarchy = build_hierarchy_from_layers(graph, &layers, directed);
+        let base_hierarchy_raw = build_hierarchy_from_layers(graph, &layers, directed);
+        // Match Infomap default hierarchical path: remove submodules after fast super search
+        // before recursive partitioning (`fastHierarchicalSolution == 0` behavior).
+        let base_hierarchy = flatten_hierarchy_to_top_modules(graph, &base_hierarchy_raw, directed);
         let base_codelength = hierarchy_codelength(graph, &base_hierarchy);
         let mut dynamic_hierarchy =
             DynamicHierarchy::from_result(&base_hierarchy, graph.node_count());
