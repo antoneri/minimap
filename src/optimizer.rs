@@ -40,6 +40,71 @@ enum EdgeStorage<'g> {
     },
 }
 
+trait AdjAccess {
+    fn out_neighbor(&self, edge_idx: usize) -> u32;
+    fn out_flow(&self, edge_idx: usize) -> f64;
+    fn in_neighbor(&self, edge_idx: usize) -> u32;
+    fn in_flow(&self, edge_idx: usize) -> f64;
+}
+
+struct BorrowedAdj<'a> {
+    edge_source: &'a [u32],
+    edge_target: &'a [u32],
+    edge_flow: &'a [f64],
+    in_edge_idx: &'a [u32],
+}
+
+impl AdjAccess for BorrowedAdj<'_> {
+    #[inline]
+    fn out_neighbor(&self, edge_idx: usize) -> u32 {
+        self.edge_target[edge_idx]
+    }
+
+    #[inline]
+    fn out_flow(&self, edge_idx: usize) -> f64 {
+        self.edge_flow[edge_idx]
+    }
+
+    #[inline]
+    fn in_neighbor(&self, edge_idx: usize) -> u32 {
+        self.edge_source[self.in_edge_idx[edge_idx] as usize]
+    }
+
+    #[inline]
+    fn in_flow(&self, edge_idx: usize) -> f64 {
+        self.edge_flow[self.in_edge_idx[edge_idx] as usize]
+    }
+}
+
+struct OwnedAdj<'a> {
+    out_neighbor: &'a [u32],
+    out_flow: &'a [f64],
+    in_neighbor: &'a [u32],
+    in_flow: &'a [f64],
+}
+
+impl AdjAccess for OwnedAdj<'_> {
+    #[inline]
+    fn out_neighbor(&self, edge_idx: usize) -> u32 {
+        self.out_neighbor[edge_idx]
+    }
+
+    #[inline]
+    fn out_flow(&self, edge_idx: usize) -> f64 {
+        self.out_flow[edge_idx]
+    }
+
+    #[inline]
+    fn in_neighbor(&self, edge_idx: usize) -> u32 {
+        self.in_neighbor[edge_idx]
+    }
+
+    #[inline]
+    fn in_flow(&self, edge_idx: usize) -> f64 {
+        self.in_flow[edge_idx]
+    }
+}
+
 #[derive(Debug, Clone)]
 struct ActiveNetwork<'g> {
     nodes: Vec<ActiveNode>,
@@ -119,62 +184,6 @@ impl<'g> ActiveNetwork<'g> {
         span.start as usize..span.end as usize
     }
 
-    #[inline]
-    fn out_neighbor_at(&self, edge_idx: usize) -> u32 {
-        match &self.edge_storage {
-            EdgeStorage::Borrowed { edge_target, .. } => edge_target[edge_idx],
-            EdgeStorage::Owned { out_neighbor, .. } => out_neighbor[edge_idx],
-        }
-    }
-
-    #[inline]
-    fn out_flow_at(&self, edge_idx: usize) -> f64 {
-        match &self.edge_storage {
-            EdgeStorage::Borrowed { edge_flow, .. } => edge_flow[edge_idx],
-            EdgeStorage::Owned { out_flow, .. } => out_flow[edge_idx],
-        }
-    }
-
-    #[inline]
-    fn in_neighbor_at(&self, edge_idx: usize) -> u32 {
-        match &self.edge_storage {
-            EdgeStorage::Borrowed {
-                edge_source,
-                in_edge_idx,
-                ..
-            } => edge_source[in_edge_idx[edge_idx] as usize],
-            EdgeStorage::Owned { in_neighbor, .. } => in_neighbor[edge_idx],
-        }
-    }
-
-    #[inline]
-    fn in_flow_at(&self, edge_idx: usize) -> f64 {
-        match &self.edge_storage {
-            EdgeStorage::Borrowed {
-                edge_flow,
-                in_edge_idx,
-                ..
-            } => edge_flow[in_edge_idx[edge_idx] as usize],
-            EdgeStorage::Owned { in_flow, .. } => in_flow[edge_idx],
-        }
-    }
-
-    #[inline]
-    fn degree(&self, node_idx: usize) -> usize {
-        let mut degree = 0usize;
-        for e in self.out_range(node_idx) {
-            if self.out_neighbor_at(e) as usize != node_idx {
-                degree += 1;
-            }
-        }
-        for e in self.in_range(node_idx) {
-            if self.in_neighbor_at(e) as usize != node_idx {
-                degree += 1;
-            }
-        }
-        degree
-    }
-
     fn prefix_offsets(counts: &[u32]) -> Vec<u32> {
         let mut offsets = vec![0u32; counts.len() + 1];
         for i in 0..counts.len() {
@@ -224,6 +233,45 @@ impl<'g> ActiveNetwork<'g> {
         node_module: &[u32],
         module_data: &[FlowData],
         workspace: &mut OptimizeWorkspace,
+    ) -> Self {
+        match &self.edge_storage {
+            EdgeStorage::Borrowed {
+                edge_source,
+                edge_target,
+                edge_flow,
+                in_edge_idx,
+            } => {
+                let adj = BorrowedAdj {
+                    edge_source,
+                    edge_target,
+                    edge_flow,
+                    in_edge_idx,
+                };
+                self.consolidate_with_adj(node_module, module_data, workspace, &adj)
+            }
+            EdgeStorage::Owned {
+                out_neighbor,
+                out_flow,
+                in_neighbor,
+                in_flow,
+            } => {
+                let adj = OwnedAdj {
+                    out_neighbor,
+                    out_flow,
+                    in_neighbor,
+                    in_flow,
+                };
+                self.consolidate_with_adj(node_module, module_data, workspace, &adj)
+            }
+        }
+    }
+
+    fn consolidate_with_adj<A: AdjAccess>(
+        &self,
+        node_module: &[u32],
+        module_data: &[FlowData],
+        workspace: &mut OptimizeWorkspace,
+        adj: &A,
     ) -> Self {
         let n = self.node_count();
         let mut old_to_new = vec![u32::MAX; module_data.len()];
@@ -353,13 +401,13 @@ impl<'g> ActiveNetwork<'g> {
             for p in start..end {
                 let node_idx = consolidate_module_nodes[p] as usize;
                 for e in self.out_range(node_idx) {
-                    let target_node = self.out_neighbor_at(e) as usize;
+                    let target_node = adj.out_neighbor(e) as usize;
                     let dst_m = old_to_new[node_module[target_node] as usize] as usize;
                     if src_m == dst_m {
                         continue;
                     }
 
-                    let flow = self.out_flow_at(e);
+                    let flow = adj.out_flow(e);
                     // Sparse stamp accumulator: same semantics as map aggregation, lower overhead.
                     if consolidate_dst_stamp[dst_m] != stamp_gen {
                         consolidate_dst_stamp[dst_m] = stamp_gen;
@@ -486,8 +534,25 @@ fn add_candidate(
     }
 }
 
-fn move_node_to_predefined_module(
+#[inline]
+fn degree_with_adj<A: AdjAccess>(active: &ActiveNetwork<'_>, adj: &A, node_idx: usize) -> usize {
+    let mut degree = 0usize;
+    for e in active.out_range(node_idx) {
+        if adj.out_neighbor(e) as usize != node_idx {
+            degree += 1;
+        }
+    }
+    for e in active.in_range(node_idx) {
+        if adj.in_neighbor(e) as usize != node_idx {
+            degree += 1;
+        }
+    }
+    degree
+}
+
+fn move_node_to_predefined_module<A: AdjAccess>(
     active: &ActiveNetwork<'_>,
+    adj: &A,
     node_idx: usize,
     new_module: u32,
     objective: &mut MapEquationObjective,
@@ -513,11 +578,11 @@ fn move_node_to_predefined_module(
     };
 
     for e in active.out_range(node_idx) {
-        let nbr_idx = active.out_neighbor_at(e) as usize;
+        let nbr_idx = adj.out_neighbor(e) as usize;
         if nbr_idx == node_idx {
             continue;
         }
-        let flow = active.out_flow_at(e);
+        let flow = adj.out_flow(e);
         let other_module = node_module[nbr_idx];
         if other_module == old_module {
             old_delta.delta_exit += flow;
@@ -526,11 +591,11 @@ fn move_node_to_predefined_module(
         }
     }
     for e in active.in_range(node_idx) {
-        let nbr_idx = active.in_neighbor_at(e) as usize;
+        let nbr_idx = adj.in_neighbor(e) as usize;
         if nbr_idx == node_idx {
             continue;
         }
-        let flow = active.in_flow_at(e);
+        let flow = adj.in_flow(e);
         let other_module = node_module[nbr_idx];
         if other_module == old_module {
             old_delta.delta_enter += flow;
@@ -561,8 +626,9 @@ fn move_node_to_predefined_module(
     true
 }
 
-fn try_move_each_node_into_best_module(
+fn try_move_each_node_into_best_module<A: AdjAccess>(
     active: &ActiveNetwork<'_>,
+    adj: &A,
     rng: &mut impl TrialRng,
     objective: &mut MapEquationObjective,
     node_module: &mut [u32],
@@ -624,11 +690,11 @@ fn try_move_each_node_into_best_module(
         touched_modules.clear();
 
         for e in active.out_range(node_idx) {
-            let nbr_idx = active.out_neighbor_at(e) as usize;
+            let nbr_idx = adj.out_neighbor(e) as usize;
             if nbr_idx == node_idx {
                 continue;
             }
-            let flow = active.out_flow_at(e);
+            let flow = adj.out_flow(e);
             let m = node_module[nbr_idx];
             add_candidate(
                 m,
@@ -643,11 +709,11 @@ fn try_move_each_node_into_best_module(
         }
 
         for e in active.in_range(node_idx) {
-            let nbr_idx = active.in_neighbor_at(e) as usize;
+            let nbr_idx = adj.in_neighbor(e) as usize;
             if nbr_idx == node_idx {
                 continue;
             }
-            let flow = active.in_flow_at(e);
+            let flow = adj.in_flow(e);
             let m = node_module[nbr_idx];
             add_candidate(
                 m,
@@ -771,7 +837,7 @@ fn try_move_each_node_into_best_module(
             let mut num_linked_nodes_in_old_module = 0u32;
 
             for e in active.out_range(node_idx) {
-                let nbr = active.out_neighbor_at(e);
+                let nbr = adj.out_neighbor(e);
                 let nbr_idx = nbr as usize;
                 if nbr_idx == node_idx {
                     continue;
@@ -783,7 +849,7 @@ fn try_move_each_node_into_best_module(
                 }
             }
             for e in active.in_range(node_idx) {
-                let nbr = active.in_neighbor_at(e);
+                let nbr = adj.in_neighbor(e);
                 let nbr_idx = nbr as usize;
                 if nbr_idx == node_idx {
                     continue;
@@ -800,6 +866,7 @@ fn try_move_each_node_into_best_module(
                 let companion_idx = node_in_old_module as usize;
                 if move_node_to_predefined_module(
                     active,
+                    adj,
                     companion_idx,
                     best_module,
                     objective,
@@ -810,15 +877,15 @@ fn try_move_each_node_into_best_module(
                 ) {
                     moved += 1;
 
-                    if active.degree(companion_idx) > 1 {
+                    if degree_with_adj(active, adj, companion_idx) > 1 {
                         for e in active.out_range(companion_idx) {
-                            let nbr = active.out_neighbor_at(e);
+                            let nbr = adj.out_neighbor(e);
                             if nbr as usize != companion_idx {
                                 dirty[nbr as usize] = true;
                             }
                         }
                         for e in active.in_range(companion_idx) {
-                            let nbr = active.in_neighbor_at(e);
+                            let nbr = adj.in_neighbor(e);
                             if nbr as usize != companion_idx {
                                 dirty[nbr as usize] = true;
                             }
@@ -841,6 +908,66 @@ fn try_move_each_node_into_best_module(
 
 fn optimize_active_network(
     active: &ActiveNetwork<'_>,
+    rng: &mut impl TrialRng,
+    objective: &mut MapEquationObjective,
+    predefined_modules: Option<&[u32]>,
+    lock_multi_module_nodes: bool,
+    loop_limit: usize,
+    workspace: &mut OptimizeWorkspace,
+) -> OptimizeLevelResult {
+    match &active.edge_storage {
+        EdgeStorage::Borrowed {
+            edge_source,
+            edge_target,
+            edge_flow,
+            in_edge_idx,
+        } => {
+            let adj = BorrowedAdj {
+                edge_source,
+                edge_target,
+                edge_flow,
+                in_edge_idx,
+            };
+            optimize_active_network_with_adj(
+                active,
+                &adj,
+                rng,
+                objective,
+                predefined_modules,
+                lock_multi_module_nodes,
+                loop_limit,
+                workspace,
+            )
+        }
+        EdgeStorage::Owned {
+            out_neighbor,
+            out_flow,
+            in_neighbor,
+            in_flow,
+        } => {
+            let adj = OwnedAdj {
+                out_neighbor,
+                out_flow,
+                in_neighbor,
+                in_flow,
+            };
+            optimize_active_network_with_adj(
+                active,
+                &adj,
+                rng,
+                objective,
+                predefined_modules,
+                lock_multi_module_nodes,
+                loop_limit,
+                workspace,
+            )
+        }
+    }
+}
+
+fn optimize_active_network_with_adj<A: AdjAccess>(
+    active: &ActiveNetwork<'_>,
+    adj: &A,
     rng: &mut impl TrialRng,
     objective: &mut MapEquationObjective,
     predefined_modules: Option<&[u32]>,
@@ -874,6 +1001,7 @@ fn optimize_active_network(
             let new_m = modules[i];
             let _ = move_node_to_predefined_module(
                 active,
+                adj,
                 i,
                 new_m,
                 objective,
@@ -894,6 +1022,7 @@ fn optimize_active_network(
 
         let moved = try_move_each_node_into_best_module(
             active,
+            adj,
             rng,
             objective,
             &mut node_module,
