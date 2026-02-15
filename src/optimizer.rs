@@ -612,6 +612,8 @@ fn try_move_each_node_into_best_module(
             delta_exit: cand_delta_exit[old_idx],
             delta_enter: cand_delta_enter[old_idx],
         };
+        let move_context =
+            objective.prepare_move_context(&active.nodes[node_idx].data, &old_delta, module_data);
 
         module_order.clear();
         module_order.resize(cand_modules.len(), 0);
@@ -638,12 +640,8 @@ fn try_move_each_node_into_best_module(
                 delta_enter: cand_delta_enter[cidx],
             };
 
-            let delta = objective.get_delta_on_move(
-                &active.nodes[node_idx].data,
-                &old_delta,
-                &cand_delta,
-                module_data,
-            );
+            let delta =
+                objective.get_delta_on_move_with_context(&move_context, &cand_delta, module_data);
 
             if delta < best_delta_codelength - MIN_SINGLE_NODE_IMPROVEMENT {
                 best_module = other_module;

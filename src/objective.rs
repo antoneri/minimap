@@ -7,6 +7,20 @@ pub struct DeltaFlow {
     pub delta_enter: f64,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MoveDeltaContext {
+    de_old: f64,
+    current_flow: f64,
+    current_enter_flow: f64,
+    current_exit_flow: f64,
+    old_enter_before: f64,
+    old_enter_after: f64,
+    old_exit_before: f64,
+    old_exit_after: f64,
+    old_total_before: f64,
+    old_total_after: f64,
+}
+
 #[inline]
 pub fn plogp(p: f64) -> f64 {
     if p > 0.0 { p * p.log2() } else { 0.0 }
@@ -78,37 +92,74 @@ impl MapEquationObjective {
         new_delta: &DeltaFlow,
         module_data: &[FlowData],
     ) -> f64 {
-        let old_m = old_delta.module as usize;
-        let new_m = new_delta.module as usize;
+        let context = self.prepare_move_context(current, old_delta, module_data);
+        self.get_delta_on_move_with_context(&context, new_delta, module_data)
+    }
 
+    pub(crate) fn prepare_move_context(
+        &self,
+        current: &FlowData,
+        old_delta: &DeltaFlow,
+        module_data: &[FlowData],
+    ) -> MoveDeltaContext {
+        let old_m = old_delta.module as usize;
         let de_old = old_delta.delta_enter + old_delta.delta_exit;
+
+        let old_enter_before = plogp(module_data[old_m].enter_flow);
+        let old_enter_after = plogp(module_data[old_m].enter_flow - current.enter_flow + de_old);
+        let old_exit_before = plogp(module_data[old_m].exit_flow);
+        let old_exit_after = plogp(module_data[old_m].exit_flow - current.exit_flow + de_old);
+        let old_total_before = plogp(module_data[old_m].exit_flow + module_data[old_m].flow);
+        let old_total_after = plogp(
+            module_data[old_m].exit_flow + module_data[old_m].flow
+                - current.exit_flow
+                - current.flow
+                + de_old,
+        );
+
+        MoveDeltaContext {
+            de_old,
+            current_flow: current.flow,
+            current_enter_flow: current.enter_flow,
+            current_exit_flow: current.exit_flow,
+            old_enter_before,
+            old_enter_after,
+            old_exit_before,
+            old_exit_after,
+            old_total_before,
+            old_total_after,
+        }
+    }
+
+    pub(crate) fn get_delta_on_move_with_context(
+        &self,
+        context: &MoveDeltaContext,
+        new_delta: &DeltaFlow,
+        module_data: &[FlowData],
+    ) -> f64 {
+        let new_m = new_delta.module as usize;
         let de_new = new_delta.delta_enter + new_delta.delta_exit;
 
-        let delta_enter = plogp(self.enter_flow + de_old - de_new) - self.enter_flow_log_enter_flow;
+        let delta_enter =
+            plogp(self.enter_flow + context.de_old - de_new) - self.enter_flow_log_enter_flow;
 
-        let delta_enter_log_enter = -plogp(module_data[old_m].enter_flow)
+        let delta_enter_log_enter = -context.old_enter_before
             - plogp(module_data[new_m].enter_flow)
-            + plogp(module_data[old_m].enter_flow - current.enter_flow + de_old)
-            + plogp(module_data[new_m].enter_flow + current.enter_flow - de_new);
+            + context.old_enter_after
+            + plogp(module_data[new_m].enter_flow + context.current_enter_flow - de_new);
 
-        let delta_exit_log_exit = -plogp(module_data[old_m].exit_flow)
-            - plogp(module_data[new_m].exit_flow)
-            + plogp(module_data[old_m].exit_flow - current.exit_flow + de_old)
-            + plogp(module_data[new_m].exit_flow + current.exit_flow - de_new);
+        let delta_exit_log_exit = -context.old_exit_before - plogp(module_data[new_m].exit_flow)
+            + context.old_exit_after
+            + plogp(module_data[new_m].exit_flow + context.current_exit_flow - de_new);
 
-        let delta_flow_log_flow = -plogp(module_data[old_m].exit_flow + module_data[old_m].flow)
+        let delta_flow_log_flow = -context.old_total_before
             - plogp(module_data[new_m].exit_flow + module_data[new_m].flow)
-            + plogp(
-                module_data[old_m].exit_flow + module_data[old_m].flow
-                    - current.exit_flow
-                    - current.flow
-                    + de_old,
-            )
+            + context.old_total_after
             + plogp(
                 module_data[new_m].exit_flow
                     + module_data[new_m].flow
-                    + current.exit_flow
-                    + current.flow
+                    + context.current_exit_flow
+                    + context.current_flow
                     - de_new,
             );
 
