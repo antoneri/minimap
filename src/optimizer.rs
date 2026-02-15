@@ -198,7 +198,7 @@ impl<'g> ActiveNetwork<'g> {
         let mut member_leaf = Vec::with_capacity(n);
         for i in 0..n {
             nodes.push(ActiveNode {
-                data: graph.nodes[i].data,
+                data: graph.node_data[i],
                 out_span: EdgeSpan {
                     start: graph.out_offsets[i],
                     end: graph.out_offsets[i + 1],
@@ -1231,9 +1231,9 @@ fn compute_module_data(
 ) -> Vec<FlowData> {
     let mut modules = vec![FlowData::default(); num_modules as usize];
 
-    for (i, node) in graph.nodes.iter().enumerate() {
+    for (i, node) in graph.node_data.iter().enumerate() {
         let m = node_to_module[i] as usize;
-        modules[m].flow += node.data.flow;
+        modules[m].flow += node.flow;
     }
 
     for e in 0..graph.edge_count() {
@@ -1262,14 +1262,14 @@ fn compute_module_data(
 
 fn one_level_codelength(graph: &Graph) -> f64 {
     let mut sum = 0.0;
-    for node in &graph.nodes {
-        sum -= plogp(node.data.flow);
+    for node in &graph.node_data {
+        sum -= plogp(node.flow);
     }
     sum
 }
 
 fn single_trial(graph: &Graph, rng: &mut impl TrialRng, directed: bool) -> TrialResult {
-    let node_data: Vec<FlowData> = graph.nodes.iter().map(|n| n.data).collect();
+    let node_data = graph.node_data.clone();
     let mut objective = MapEquationObjective::new(&node_data);
     let mut workspace = OptimizeWorkspace::default();
 

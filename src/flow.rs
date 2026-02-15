@@ -175,27 +175,27 @@ fn finalize(
                 TELEPORT_PROBABILITY
             };
 
-        graph.nodes[i].data.flow = node_flow[i];
-        graph.nodes[i].data.teleport_weight = tele_w;
-        graph.nodes[i].data.teleport_flow = tele_flow;
-        graph.nodes[i].data.enter_flow = node_flow[i];
-        graph.nodes[i].data.exit_flow = node_flow[i];
-        graph.nodes[i].data.dangling_flow = if node_out_degree[i] == 0 {
+        graph.node_data[i].flow = node_flow[i];
+        graph.node_data[i].teleport_weight = tele_w;
+        graph.node_data[i].teleport_flow = tele_flow;
+        graph.node_data[i].enter_flow = node_flow[i];
+        graph.node_data[i].exit_flow = node_flow[i];
+        graph.node_data[i].dangling_flow = if node_out_degree[i] == 0 {
             node_flow[i]
         } else {
             0.0
         };
 
-        graph.nodes[i].data.enter_flow -= tele_flow * tele_w;
-        graph.nodes[i].data.exit_flow -= tele_flow * tele_w;
+        graph.node_data[i].enter_flow -= tele_flow * tele_w;
+        graph.node_data[i].exit_flow -= tele_flow * tele_w;
 
         let norm = if cfg.directed { 1.0 } else { 2.0 };
         for e in graph.out_range(i) {
             let s = graph.edge_source[e] as usize;
             let t = graph.edge_target[e] as usize;
             if s == t {
-                graph.nodes[i].data.enter_flow -= graph.edge_flow[e] / norm;
-                graph.nodes[i].data.exit_flow -= graph.edge_flow[e] / norm;
+                graph.node_data[i].enter_flow -= graph.edge_flow[e] / norm;
+                graph.node_data[i].exit_flow -= graph.edge_flow[e] / norm;
                 break;
             }
         }
@@ -214,8 +214,8 @@ fn finalize(
         }
 
         for i in 0..n {
-            graph.nodes[i].data.enter_flow = enter_flow[i];
-            graph.nodes[i].data.exit_flow = exit_flow[i];
+            graph.node_data[i].enter_flow = enter_flow[i];
+            graph.node_data[i].exit_flow = exit_flow[i];
         }
     }
 }

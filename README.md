@@ -83,6 +83,9 @@ minimap modular_wd.net . --directed --two-level --output tree,clu,ftree --seed 1
   - Reads link-list and Pajek sections
   - Deduplicates edges by `(source, target)` and aggregates weights
 - Graph storage:
+  - Hot/cold node split:
+    - Hot flow fields in a contiguous `node_data: Vec<FlowData>`
+    - Cold metadata split into `node_ids`, `node_names`, and `node_input_weight`
   - CSR-style arrays for outgoing edges (`out_offsets`, `edge_source`, `edge_target`, `edge_weight`)
   - Reverse index for incoming traversal (`in_offsets`, `in_edge_idx`)
   - Edge flow stored in-place (`edge_flow`)

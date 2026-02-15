@@ -82,11 +82,11 @@ fn build_ordered_modules(graph: &Graph, trial: &TrialResult) -> OrderedModules {
 
     for nodes in &mut module_nodes {
         nodes.sort_unstable_by(|&a, &b| {
-            let fa = graph.nodes[a].data.flow;
-            let fb = graph.nodes[b].data.flow;
+            let fa = graph.node_data[a].flow;
+            let fb = graph.node_data[b].flow;
             fb.partial_cmp(&fa)
                 .unwrap_or(std::cmp::Ordering::Equal)
-                .then(graph.nodes[a].id.cmp(&graph.nodes[b].id))
+                .then(graph.node_ids[a].cmp(&graph.node_ids[b]))
         });
     }
 
@@ -178,12 +178,15 @@ fn write_tree_file(
     for (module_zero, nodes) in ordered.module_nodes.iter().enumerate() {
         let module_id = module_zero as u32 + 1;
         for (pos, &node_idx) in nodes.iter().enumerate() {
-            let node = &graph.nodes[node_idx];
             let path_s = format!("{}:{}", module_id, pos + 1);
-            let flow_s = fmt_sig(node.data.flow, 6);
+            let flow_s = fmt_sig(graph.node_data[node_idx].flow, 6);
             let name_s = graph.node_name_or_id(node_idx);
-            writeln!(w, "{} {} \"{}\" {}", path_s, flow_s, name_s, node.id)
-                .map_err(|e| e.to_string())?;
+            writeln!(
+                w,
+                "{} {} \"{}\" {}",
+                path_s, flow_s, name_s, graph.node_ids[node_idx]
+            )
+            .map_err(|e| e.to_string())?;
         }
     }
 
@@ -218,13 +221,12 @@ fn write_clu_file(
     for (module_zero, nodes) in ordered.module_nodes.iter().enumerate() {
         let module_id = module_zero as u32 + 1;
         for &node_idx in nodes {
-            let node = &graph.nodes[node_idx];
             writeln!(
                 w,
                 "{} {} {}",
-                node.id,
+                graph.node_ids[node_idx],
                 module_id,
-                fmt_sig(node.data.flow, 6)
+                fmt_sig(graph.node_data[node_idx].flow, 6)
             )
             .map_err(|e| e.to_string())?;
         }
@@ -260,12 +262,15 @@ fn write_ftree_file(
     for (module_zero, nodes) in ordered.module_nodes.iter().enumerate() {
         let module_id = module_zero as u32 + 1;
         for (pos, &node_idx) in nodes.iter().enumerate() {
-            let node = &graph.nodes[node_idx];
             let path_s = format!("{}:{}", module_id, pos + 1);
-            let flow_s = fmt_sig(node.data.flow, 6);
+            let flow_s = fmt_sig(graph.node_data[node_idx].flow, 6);
             let name_s = graph.node_name_or_id(node_idx);
-            writeln!(w, "{} {} \"{}\" {}", path_s, flow_s, name_s, node.id)
-                .map_err(|e| e.to_string())?;
+            writeln!(
+                w,
+                "{} {} \"{}\" {}",
+                path_s, flow_s, name_s, graph.node_ids[node_idx]
+            )
+            .map_err(|e| e.to_string())?;
         }
     }
 

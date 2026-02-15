@@ -32,16 +32,13 @@ impl FlowData {
 }
 
 #[derive(Debug, Clone)]
-pub struct NodeRecord {
-    pub id: u32,
-    pub name: Option<String>,
-    pub input_weight: f64,
-    pub data: FlowData,
-}
-
-#[derive(Debug, Clone)]
 pub struct Graph {
-    pub nodes: Vec<NodeRecord>,
+    // Hot node state is kept in a dedicated vector to keep optimizer/flow walks cache-local.
+    pub node_data: Vec<FlowData>,
+    // Cold metadata is split out; accessed only in parse/output paths.
+    pub node_ids: Vec<u32>,
+    pub node_names: Vec<Option<String>>,
+    pub node_input_weight: Vec<f64>,
     pub edge_source: Vec<u32>,
     pub edge_target: Vec<u32>,
     pub edge_weight: Vec<f64>,
@@ -65,18 +62,19 @@ impl Graph {
             id_to_idx.insert(id, idx as u32);
         }
 
-        let mut nodes = Vec::with_capacity(node_ids.len());
+        let mut node_data = Vec::with_capacity(node_ids.len());
+        let mut node_ids_out = Vec::with_capacity(node_ids.len());
+        let mut node_names = Vec::with_capacity(node_ids.len());
+        let mut node_input_weight = Vec::with_capacity(node_ids.len());
         for id in node_ids.iter().copied() {
             let v = parsed
                 .vertices
                 .get(&id)
                 .ok_or_else(|| format!("Missing vertex metadata for node {}", id))?;
-            nodes.push(NodeRecord {
-                id,
-                name: v.name.clone(),
-                input_weight: v.weight,
-                data: FlowData::default(),
-            });
+            node_ids_out.push(id);
+            node_names.push(v.name.clone());
+            node_input_weight.push(v.weight);
+            node_data.push(FlowData::default());
         }
 
         let mut edges: Vec<(u32, u32, f64)> = Vec::with_capacity(parsed.links.len());
@@ -96,7 +94,7 @@ impl Graph {
         edges.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
 
         let m = edges.len();
-        let n = nodes.len();
+        let n = node_data.len();
         let mut edge_source = Vec::with_capacity(m);
         let mut edge_target = Vec::with_capacity(m);
         let mut edge_weight = Vec::with_capacity(m);
@@ -146,7 +144,10 @@ impl Graph {
         };
 
         Ok(Self {
-            nodes,
+            node_data,
+            node_ids: node_ids_out,
+            node_names,
+            node_input_weight,
             edge_source,
             edge_target,
             edge_weight,
@@ -165,7 +166,7 @@ impl Graph {
 
     #[inline]
     pub fn node_count(&self) -> usize {
-        self.nodes.len()
+        self.node_data.len()
     }
 
     #[inline]
@@ -189,9 +190,8 @@ impl Graph {
     }
 
     pub fn node_name_or_id(&self, node_idx: usize) -> String {
-        self.nodes[node_idx]
-            .name
+        self.node_names[node_idx]
             .clone()
-            .unwrap_or_else(|| self.nodes[node_idx].id.to_string())
+            .unwrap_or_else(|| self.node_ids[node_idx].to_string())
     }
 }
