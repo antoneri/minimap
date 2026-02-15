@@ -9,24 +9,34 @@ const MIN_CODELENGTH_IMPROVEMENT: f64 = 1e-10;
 const MIN_SINGLE_NODE_IMPROVEMENT: f64 = 1e-16;
 const MIN_RELATIVE_TUNE_ITERATION_IMPROVEMENT: f64 = 1e-5;
 
+#[derive(Debug, Clone, Copy, Default)]
+struct EdgeSpan {
+    start: u32,
+    end: u32,
+}
+
+impl EdgeSpan {
+    #[inline]
+    fn len(self) -> usize {
+        (self.end - self.start) as usize
+    }
+}
+
 #[derive(Debug, Clone)]
 struct ActiveNode {
     data: FlowData,
-    out_edges: Vec<(u32, f64)>,
-    in_edges: Vec<(u32, f64)>,
+    out_span: EdgeSpan,
+    in_span: EdgeSpan,
     members: Vec<u32>,
-}
-
-impl ActiveNode {
-    #[inline]
-    fn degree(&self) -> usize {
-        self.out_edges.len() + self.in_edges.len()
-    }
 }
 
 #[derive(Debug, Clone)]
 struct ActiveNetwork {
     nodes: Vec<ActiveNode>,
+    out_neighbor: Vec<u32>,
+    out_flow: Vec<f64>,
+    in_neighbor: Vec<u32>,
+    in_flow: Vec<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -35,6 +45,19 @@ struct OptimizeLevelResult {
     module_data: Vec<FlowData>,
     codelength: f64,
     effective_loops: u32,
+}
+
+#[derive(Debug, Default)]
+struct OptimizeWorkspace {
+    node_order: Vec<u32>,
+    redirect: Vec<u32>,
+    touched_modules: Vec<u32>,
+    cand_modules: Vec<u32>,
+    cand_delta_exit: Vec<f64>,
+    cand_delta_enter: Vec<f64>,
+    module_order: Vec<u32>,
+    module_indices: Vec<u32>,
+    flow_data: Vec<FlowData>,
 }
 
 #[derive(Debug, Clone)]
@@ -47,17 +70,71 @@ pub struct TrialResult {
 }
 
 impl ActiveNetwork {
+    #[inline]
+    fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    #[inline]
+    fn out_range(&self, node_idx: usize) -> std::ops::Range<usize> {
+        let span = self.nodes[node_idx].out_span;
+        span.start as usize..span.end as usize
+    }
+
+    #[inline]
+    fn in_range(&self, node_idx: usize) -> std::ops::Range<usize> {
+        let span = self.nodes[node_idx].in_span;
+        span.start as usize..span.end as usize
+    }
+
+    #[inline]
+    fn degree(&self, node_idx: usize) -> usize {
+        self.nodes[node_idx].out_span.len() + self.nodes[node_idx].in_span.len()
+    }
+
+    fn prefix_offsets(counts: &[u32]) -> Vec<u32> {
+        let mut offsets = vec![0u32; counts.len() + 1];
+        for i in 0..counts.len() {
+            offsets[i + 1] = offsets[i] + counts[i];
+        }
+        offsets
+    }
+
     fn from_graph(graph: &Graph) -> Self {
         let n = graph.node_count();
         let mut nodes = Vec::with_capacity(n);
         for i in 0..n {
             nodes.push(ActiveNode {
                 data: graph.nodes[i].data,
-                out_edges: Vec::new(),
-                in_edges: Vec::new(),
+                out_span: EdgeSpan::default(),
+                in_span: EdgeSpan::default(),
                 members: vec![i as u32],
             });
         }
+
+        let mut out_counts = vec![0u32; n];
+        let mut in_counts = vec![0u32; n];
+        for s in 0..n {
+            for e in graph.out_range(s) {
+                let t = graph.edge_target[e] as usize;
+                if s == t {
+                    continue;
+                }
+                out_counts[s] += 1;
+                in_counts[t] += 1;
+            }
+        }
+
+        let out_offsets = Self::prefix_offsets(&out_counts);
+        let in_offsets = Self::prefix_offsets(&in_counts);
+        let total_edges = out_offsets[n] as usize;
+
+        let mut out_neighbor = vec![0u32; total_edges];
+        let mut out_flow = vec![0.0f64; total_edges];
+        let mut in_neighbor = vec![0u32; total_edges];
+        let mut in_flow = vec![0.0f64; total_edges];
+        let mut out_fill = vec![0u32; n];
+        let mut in_fill = vec![0u32; n];
 
         for s in 0..n {
             for e in graph.out_range(s) {
@@ -66,16 +143,41 @@ impl ActiveNetwork {
                     continue;
                 }
                 let f = graph.edge_flow[e];
-                nodes[s].out_edges.push((t as u32, f));
-                nodes[t].in_edges.push((s as u32, f));
+
+                let out_pos = out_offsets[s] + out_fill[s];
+                out_neighbor[out_pos as usize] = t as u32;
+                out_flow[out_pos as usize] = f;
+                out_fill[s] += 1;
+
+                let in_pos = in_offsets[t] + in_fill[t];
+                in_neighbor[in_pos as usize] = s as u32;
+                in_flow[in_pos as usize] = f;
+                in_fill[t] += 1;
             }
         }
 
-        Self { nodes }
+        for i in 0..n {
+            nodes[i].out_span = EdgeSpan {
+                start: out_offsets[i],
+                end: out_offsets[i + 1],
+            };
+            nodes[i].in_span = EdgeSpan {
+                start: in_offsets[i],
+                end: in_offsets[i + 1],
+            };
+        }
+
+        Self {
+            nodes,
+            out_neighbor,
+            out_flow,
+            in_neighbor,
+            in_flow,
+        }
     }
 
     fn consolidate(&self, node_module: &[u32], module_data: &[FlowData]) -> Self {
-        let n = self.nodes.len();
+        let n = self.node_count();
         let mut old_to_new = vec![u32::MAX; module_data.len()];
         let mut ordered_old_modules = Vec::<u32>::new();
 
@@ -90,8 +192,8 @@ impl ActiveNetwork {
         let mut new_nodes: Vec<ActiveNode> = (0..ordered_old_modules.len())
             .map(|_| ActiveNode {
                 data: FlowData::default(),
-                out_edges: Vec::new(),
-                in_edges: Vec::new(),
+                out_span: EdgeSpan::default(),
+                in_span: EdgeSpan::default(),
                 members: Vec::new(),
             })
             .collect();
@@ -109,11 +211,13 @@ impl ActiveNetwork {
         }
 
         let mut edge_map: FxHashMap<u64, f64> = FxHashMap::default();
-        edge_map.reserve(self.nodes.iter().map(|n| n.out_edges.len()).sum());
+        edge_map.reserve(self.out_neighbor.len());
 
         for i in 0..n {
             let src_m = old_to_new[node_module[i] as usize];
-            for &(t, f) in &self.nodes[i].out_edges {
+            for e in self.out_range(i) {
+                let t = self.out_neighbor[e];
+                let f = self.out_flow[e];
                 let dst_m = old_to_new[node_module[t as usize] as usize];
                 if src_m == dst_m {
                     continue;
@@ -129,12 +233,58 @@ impl ActiveNetwork {
             .collect();
         edges.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
 
-        for (s, t, f) in edges {
-            new_nodes[s as usize].out_edges.push((t, f));
-            new_nodes[t as usize].in_edges.push((s, f));
+        let new_n = new_nodes.len();
+        let mut out_counts = vec![0u32; new_n];
+        let mut in_counts = vec![0u32; new_n];
+        for &(s, t, _) in &edges {
+            out_counts[s as usize] += 1;
+            in_counts[t as usize] += 1;
         }
 
-        Self { nodes: new_nodes }
+        let out_offsets = Self::prefix_offsets(&out_counts);
+        let in_offsets = Self::prefix_offsets(&in_counts);
+        let total_edges = out_offsets[new_n] as usize;
+
+        let mut out_neighbor = vec![0u32; total_edges];
+        let mut out_flow = vec![0.0f64; total_edges];
+        let mut in_neighbor = vec![0u32; total_edges];
+        let mut in_flow = vec![0.0f64; total_edges];
+        let mut out_fill = vec![0u32; new_n];
+        let mut in_fill = vec![0u32; new_n];
+
+        for (s, t, f) in edges {
+            let s_idx = s as usize;
+            let t_idx = t as usize;
+
+            let out_pos = out_offsets[s_idx] + out_fill[s_idx];
+            out_neighbor[out_pos as usize] = t;
+            out_flow[out_pos as usize] = f;
+            out_fill[s_idx] += 1;
+
+            let in_pos = in_offsets[t_idx] + in_fill[t_idx];
+            in_neighbor[in_pos as usize] = s;
+            in_flow[in_pos as usize] = f;
+            in_fill[t_idx] += 1;
+        }
+
+        for i in 0..new_n {
+            new_nodes[i].out_span = EdgeSpan {
+                start: out_offsets[i],
+                end: out_offsets[i + 1],
+            };
+            new_nodes[i].in_span = EdgeSpan {
+                start: in_offsets[i],
+                end: in_offsets[i + 1],
+            };
+        }
+
+        Self {
+            nodes: new_nodes,
+            out_neighbor,
+            out_flow,
+            in_neighbor,
+            in_flow,
+        }
     }
 
     fn assignment_to_leaves(&self, leaf_count: usize) -> Vec<u32> {
@@ -199,16 +349,20 @@ fn move_node_to_predefined_module(
         delta_enter: 0.0,
     };
 
-    for &(nbr, flow) in &active.nodes[node_idx].out_edges {
-        let other_module = node_module[nbr as usize];
+    for e in active.out_range(node_idx) {
+        let nbr_idx = active.out_neighbor[e] as usize;
+        let flow = active.out_flow[e];
+        let other_module = node_module[nbr_idx];
         if other_module == old_module {
             old_delta.delta_exit += flow;
         } else if other_module == new_module {
             new_delta.delta_exit += flow;
         }
     }
-    for &(nbr, flow) in &active.nodes[node_idx].in_edges {
-        let other_module = node_module[nbr as usize];
+    for e in active.in_range(node_idx) {
+        let nbr_idx = active.in_neighbor[e] as usize;
+        let flow = active.in_flow[e];
+        let other_module = node_module[nbr_idx];
         if other_module == old_module {
             old_delta.delta_enter += flow;
         } else if other_module == new_module {
@@ -248,22 +402,39 @@ fn try_move_each_node_into_best_module(
     dirty: &mut [bool],
     empty_modules: &mut Vec<u32>,
     lock_multi_module_nodes: bool,
+    workspace: &mut OptimizeWorkspace,
 ) -> u32 {
     let n = active.nodes.len();
 
-    let mut node_order = vec![0u32; n];
-    rng.randomized_index_vector(&mut node_order);
+    let OptimizeWorkspace {
+        node_order,
+        redirect,
+        touched_modules,
+        cand_modules,
+        cand_delta_exit,
+        cand_delta_enter,
+        module_order,
+        ..
+    } = workspace;
+
+    node_order.resize(n, 0);
+    rng.randomized_index_vector(node_order);
+
+    if redirect.len() != n {
+        redirect.resize(n, u32::MAX);
+    } else {
+        redirect.fill(u32::MAX);
+    }
+
+    touched_modules.clear();
+    cand_modules.clear();
+    cand_delta_exit.clear();
+    cand_delta_enter.clear();
+    module_order.clear();
 
     let mut moved = 0u32;
 
-    let mut redirect = vec![u32::MAX; n];
-    let mut touched_modules: Vec<u32> = Vec::with_capacity(64);
-    let mut cand_modules: Vec<u32> = Vec::with_capacity(64);
-    let mut cand_delta_exit: Vec<f64> = Vec::with_capacity(64);
-    let mut cand_delta_enter: Vec<f64> = Vec::with_capacity(64);
-    let mut module_order: Vec<u32> = Vec::with_capacity(64);
-
-    for &node_u32 in &node_order {
+    for &node_u32 in node_order.iter() {
         let node_idx = node_u32 as usize;
 
         if !dirty[node_idx] {
@@ -283,31 +454,35 @@ fn try_move_each_node_into_best_module(
         cand_delta_enter.clear();
         touched_modules.clear();
 
-        for &(nbr, flow) in &active.nodes[node_idx].out_edges {
-            let m = node_module[nbr as usize];
+        for e in active.out_range(node_idx) {
+            let nbr_idx = active.out_neighbor[e] as usize;
+            let flow = active.out_flow[e];
+            let m = node_module[nbr_idx];
             add_candidate(
                 m,
                 flow,
                 0.0,
-                &mut redirect,
-                &mut touched_modules,
-                &mut cand_modules,
-                &mut cand_delta_exit,
-                &mut cand_delta_enter,
+                redirect,
+                touched_modules,
+                cand_modules,
+                cand_delta_exit,
+                cand_delta_enter,
             );
         }
 
-        for &(nbr, flow) in &active.nodes[node_idx].in_edges {
-            let m = node_module[nbr as usize];
+        for e in active.in_range(node_idx) {
+            let nbr_idx = active.in_neighbor[e] as usize;
+            let flow = active.in_flow[e];
+            let m = node_module[nbr_idx];
             add_candidate(
                 m,
                 0.0,
                 flow,
-                &mut redirect,
-                &mut touched_modules,
-                &mut cand_modules,
-                &mut cand_delta_exit,
-                &mut cand_delta_enter,
+                redirect,
+                touched_modules,
+                cand_modules,
+                cand_delta_exit,
+                cand_delta_enter,
             );
         }
 
@@ -315,11 +490,11 @@ fn try_move_each_node_into_best_module(
             current_module,
             0.0,
             0.0,
-            &mut redirect,
-            &mut touched_modules,
-            &mut cand_modules,
-            &mut cand_delta_exit,
-            &mut cand_delta_enter,
+            redirect,
+            touched_modules,
+            cand_modules,
+            cand_delta_exit,
+            cand_delta_enter,
         );
 
         if module_members[current_module as usize] > 1 {
@@ -328,11 +503,11 @@ fn try_move_each_node_into_best_module(
                     empty_module,
                     0.0,
                     0.0,
-                    &mut redirect,
-                    &mut touched_modules,
-                    &mut cand_modules,
-                    &mut cand_delta_exit,
-                    &mut cand_delta_enter,
+                    redirect,
+                    touched_modules,
+                    cand_modules,
+                    cand_delta_exit,
+                    cand_delta_enter,
                 );
             }
         }
@@ -346,7 +521,7 @@ fn try_move_each_node_into_best_module(
 
         module_order.clear();
         module_order.resize(cand_modules.len(), 0);
-        rng.randomized_index_vector(&mut module_order);
+        rng.randomized_index_vector(module_order);
 
         let mut best_module = current_module;
         let mut best_delta = old_delta;
@@ -356,7 +531,7 @@ fn try_move_each_node_into_best_module(
         let mut strongest_delta = old_delta;
         let mut strongest_delta_codelength = 0.0f64;
 
-        for &enum_idx in &module_order {
+        for &enum_idx in module_order.iter() {
             let cidx = enum_idx as usize;
             let other_module = cand_modules[cidx];
             if other_module == current_module {
@@ -421,7 +596,8 @@ fn try_move_each_node_into_best_module(
             let mut node_in_old_module = node_idx as u32;
             let mut num_linked_nodes_in_old_module = 0u32;
 
-            for &(nbr, _) in &active.nodes[node_idx].out_edges {
+            for e in active.out_range(node_idx) {
+                let nbr = active.out_neighbor[e];
                 let nbr_idx = nbr as usize;
                 dirty[nbr_idx] = true;
                 if node_module[nbr_idx] == old_module {
@@ -429,7 +605,8 @@ fn try_move_each_node_into_best_module(
                     num_linked_nodes_in_old_module += 1;
                 }
             }
-            for &(nbr, _) in &active.nodes[node_idx].in_edges {
+            for e in active.in_range(node_idx) {
+                let nbr = active.in_neighbor[e];
                 let nbr_idx = nbr as usize;
                 dirty[nbr_idx] = true;
                 if node_module[nbr_idx] == old_module {
@@ -453,11 +630,13 @@ fn try_move_each_node_into_best_module(
                 ) {
                     moved += 1;
 
-                    if active.nodes[companion_idx].degree() > 1 {
-                        for &(nbr, _) in &active.nodes[companion_idx].out_edges {
+                    if active.degree(companion_idx) > 1 {
+                        for e in active.out_range(companion_idx) {
+                            let nbr = active.out_neighbor[e];
                             dirty[nbr as usize] = true;
                         }
-                        for &(nbr, _) in &active.nodes[companion_idx].in_edges {
+                        for e in active.in_range(companion_idx) {
+                            let nbr = active.in_neighbor[e];
                             dirty[nbr as usize] = true;
                         }
                     }
@@ -467,9 +646,10 @@ fn try_move_each_node_into_best_module(
             dirty[node_idx] = false;
         }
 
-        for &m in &touched_modules {
+        for &m in touched_modules.iter() {
             redirect[m as usize] = u32::MAX;
         }
+        touched_modules.clear();
     }
 
     moved
@@ -482,6 +662,7 @@ fn optimize_active_network(
     predefined_modules: Option<&[u32]>,
     lock_multi_module_nodes: bool,
     loop_limit: usize,
+    workspace: &mut OptimizeWorkspace,
 ) -> OptimizeLevelResult {
     let n = active.nodes.len();
 
@@ -491,12 +672,19 @@ fn optimize_active_network(
     let mut dirty = vec![true; n];
     let mut empty_modules: Vec<u32> = Vec::with_capacity(n);
 
-    let module_indices: Vec<u32> = (0..n as u32).collect();
-    objective.init_partition(&module_data, &module_indices);
+    workspace.module_indices.resize(n, 0);
+    for i in 0..n {
+        workspace.module_indices[i] = i as u32;
+    }
+    objective.init_partition(&module_data, &workspace.module_indices[..n]);
 
     if let Some(modules) = predefined_modules {
         if modules.len() != n {
-            panic!("predefined module length {} != active node count {}", modules.len(), n);
+            panic!(
+                "predefined module length {} != active node count {}",
+                modules.len(),
+                n
+            );
         }
         for i in 0..n {
             let new_m = modules[i];
@@ -530,6 +718,7 @@ fn optimize_active_network(
             &mut dirty,
             &mut empty_modules,
             lock_multi_module_nodes,
+            workspace,
         );
 
         if moved == 0 || objective.codelength >= old_codelength - MIN_CODELENGTH_IMPROVEMENT {
@@ -556,23 +745,41 @@ fn assignment_from_top_network(top_network: &ActiveNetwork, leaf_count: usize) -
     top_network.assignment_to_leaves(leaf_count)
 }
 
-fn partition_codelength(node_data: &[FlowData], objective: &mut MapEquationObjective, modules: &[FlowData]) -> f64 {
-    let mut module_indices = Vec::with_capacity(modules.len());
+fn partition_codelength(
+    objective: &mut MapEquationObjective,
+    modules: &[FlowData],
+    module_indices: &mut Vec<u32>,
+) -> f64 {
+    module_indices.resize(modules.len(), 0);
     for i in 0..modules.len() {
-        module_indices.push(i as u32);
+        module_indices[i] = i as u32;
     }
-    objective.init_partition(modules, &module_indices);
-
-    // Keep objective bound to the same constant node data.
-    let _ = node_data;
-
+    objective.init_partition(modules, &module_indices[..modules.len()]);
     objective.codelength
+}
+
+fn active_modules_codelength(
+    active: &ActiveNetwork,
+    objective: &mut MapEquationObjective,
+    workspace: &mut OptimizeWorkspace,
+) -> f64 {
+    workspace.flow_data.clear();
+    workspace.flow_data.reserve(active.nodes.len());
+    for node in &active.nodes {
+        workspace.flow_data.push(node.data);
+    }
+    partition_codelength(
+        objective,
+        &workspace.flow_data,
+        &mut workspace.module_indices,
+    )
 }
 
 fn find_top_modules_repeatedly_from_leaf(
     leaf_network: &ActiveNetwork,
     objective: &mut MapEquationObjective,
     rng: &mut impl TrialRng,
+    workspace: &mut OptimizeWorkspace,
 ) -> ActiveNetwork {
     let mut have_modules = false;
     let mut active = leaf_network.clone();
@@ -584,12 +791,16 @@ fn find_top_modules_repeatedly_from_leaf(
             break;
         }
 
-        let loop_limit = if aggregation_level > 0 { 20 } else { CORE_LOOP_LIMIT };
+        let loop_limit = if aggregation_level > 0 {
+            20
+        } else {
+            CORE_LOOP_LIMIT
+        };
         let lock = aggregation_level == 0;
-        let level = optimize_active_network(&active, rng, objective, None, lock, loop_limit);
+        let level =
+            optimize_active_network(&active, rng, objective, None, lock, loop_limit, workspace);
 
-        if have_modules
-            && level.codelength >= consolidated_codelength - MIN_SINGLE_NODE_IMPROVEMENT
+        if have_modules && level.codelength >= consolidated_codelength - MIN_SINGLE_NODE_IMPROVEMENT
         {
             break;
         }
@@ -614,13 +825,10 @@ fn find_top_modules_repeatedly_from_modules(
     active_top: &ActiveNetwork,
     objective: &mut MapEquationObjective,
     rng: &mut impl TrialRng,
+    workspace: &mut OptimizeWorkspace,
 ) -> ActiveNetwork {
     let mut active = active_top.clone();
-    let mut consolidated_codelength = partition_codelength(
-        &[],
-        objective,
-        &active.nodes.iter().map(|n| n.data).collect::<Vec<_>>(),
-    );
+    let mut consolidated_codelength = active_modules_codelength(&active, objective, workspace);
     let mut aggregation_level = 0usize;
 
     loop {
@@ -628,8 +836,13 @@ fn find_top_modules_repeatedly_from_modules(
             break;
         }
 
-        let loop_limit = if aggregation_level > 0 { 20 } else { CORE_LOOP_LIMIT };
-        let level = optimize_active_network(&active, rng, objective, None, false, loop_limit);
+        let loop_limit = if aggregation_level > 0 {
+            20
+        } else {
+            CORE_LOOP_LIMIT
+        };
+        let level =
+            optimize_active_network(&active, rng, objective, None, false, loop_limit, workspace);
 
         if level.codelength >= consolidated_codelength - MIN_SINGLE_NODE_IMPROVEMENT {
             break;
@@ -655,6 +868,7 @@ fn fine_tune(
     top_network: &mut ActiveNetwork,
     objective: &mut MapEquationObjective,
     rng: &mut impl TrialRng,
+    workspace: &mut OptimizeWorkspace,
 ) -> u32 {
     if top_network.nodes.len() <= 1 {
         return 0;
@@ -669,6 +883,7 @@ fn fine_tune(
         Some(&predefined_modules),
         false,
         CORE_LOOP_LIMIT,
+        workspace,
     );
 
     if level.effective_loops == 0 {
@@ -743,36 +958,42 @@ fn one_level_codelength(graph: &Graph) -> f64 {
 fn single_trial(graph: &Graph, rng: &mut impl TrialRng, directed: bool) -> TrialResult {
     let node_data: Vec<FlowData> = graph.nodes.iter().map(|n| n.data).collect();
     let mut objective = MapEquationObjective::new(&node_data);
+    let mut workspace = OptimizeWorkspace::default();
 
     let leaf_network = ActiveNetwork::from_graph(graph);
-    let mut top_network = find_top_modules_repeatedly_from_leaf(&leaf_network, &mut objective, rng);
+    let mut top_network =
+        find_top_modules_repeatedly_from_leaf(&leaf_network, &mut objective, rng, &mut workspace);
 
     let one_level = one_level_codelength(graph);
-    let mut old_codelength = partition_codelength(
-        &node_data,
-        &mut objective,
-        &top_network.nodes.iter().map(|n| n.data).collect::<Vec<_>>(),
-    );
+    let mut old_codelength =
+        active_modules_codelength(&top_network, &mut objective, &mut workspace);
 
     let mut do_fine_tune = true;
     let mut coarse_tuned = false;
 
     while top_network.nodes.len() > 1 {
         if do_fine_tune {
-            let num_effective_loops = fine_tune(&leaf_network, &mut top_network, &mut objective, rng);
+            let num_effective_loops = fine_tune(
+                &leaf_network,
+                &mut top_network,
+                &mut objective,
+                rng,
+                &mut workspace,
+            );
             if num_effective_loops > 0 {
-                top_network =
-                    find_top_modules_repeatedly_from_modules(&top_network, &mut objective, rng);
+                top_network = find_top_modules_repeatedly_from_modules(
+                    &top_network,
+                    &mut objective,
+                    rng,
+                    &mut workspace,
+                );
             }
         } else {
             coarse_tuned = true;
         }
 
-        let new_codelength = partition_codelength(
-            &node_data,
-            &mut objective,
-            &top_network.nodes.iter().map(|n| n.data).collect::<Vec<_>>(),
-        );
+        let new_codelength =
+            active_modules_codelength(&top_network, &mut objective, &mut workspace);
 
         let is_improvement = new_codelength <= old_codelength - MIN_CODELENGTH_IMPROVEMENT
             && new_codelength
@@ -949,23 +1170,9 @@ pub fn run_trials(
     let worker_threads = resolve_trial_threads(trials, requested_threads);
 
     let mut trial_results: Vec<(u32, TrialResult)> = if parity_rng {
-        collect_trials_with_rng(
-            graph,
-            seed,
-            trials,
-            directed,
-            worker_threads,
-            Mt19937::new,
-        )
+        collect_trials_with_rng(graph, seed, trials, directed, worker_threads, Mt19937::new)
     } else {
-        collect_trials_with_rng(
-            graph,
-            seed,
-            trials,
-            directed,
-            worker_threads,
-            RustRng::new,
-        )
+        collect_trials_with_rng(graph, seed, trials, directed, worker_threads, RustRng::new)
     };
 
     // Deterministic best-trial selection independent of worker scheduling.
