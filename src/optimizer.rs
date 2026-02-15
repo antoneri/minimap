@@ -2107,6 +2107,84 @@ fn find_hierarchical_super_modules_fast<'g>(
     }
 }
 
+fn find_hierarchical_super_modules_full<'g>(
+    leaf_network: &ActiveNetwork<'g>,
+    active_top: &ActiveNetwork<'g>,
+    objective: &mut MapEquationObjective,
+    rng: &mut impl TrialRng,
+    workspace: &mut OptimizeWorkspace,
+    directed: bool,
+) -> SuperHierarchySearch<'g> {
+    let mut active = active_top.clone();
+    refresh_active_data_from_leaf_network(leaf_network, &mut active, directed);
+    let _ = active_modules_codelength(&active, objective, workspace);
+    let mut old_index_length = active_modules_terms(&active, objective, workspace).1;
+    let mut num_non_trivial_top_modules = usize::MAX;
+    let mut super_assignments = Vec::<Vec<u32>>::new();
+
+    while active.nodes.len() > 1 && num_non_trivial_top_modules > 1 {
+        let mut super_active = active.clone();
+        transform_node_flow_to_enter_flow(&mut super_active);
+        let super_leaf_network = super_active.with_compact_members();
+        workspace.flow_data.clear();
+        workspace.flow_data.reserve(super_active.nodes.len());
+        for node in &super_leaf_network.nodes {
+            workspace.flow_data.push(node.data);
+        }
+        let mut super_objective = MapEquationObjective::new(&workspace.flow_data);
+
+        let super_one_level_codelength =
+            active_modules_codelength(&super_leaf_network, &mut super_objective, workspace);
+        let super_top = optimize_two_level_from_leaf(
+            &super_leaf_network,
+            &mut super_objective,
+            rng,
+            directed,
+            super_one_level_codelength,
+            directed,
+            directed,
+            workspace,
+        );
+
+        let super_assignment =
+            assignment_from_top_network(&super_top, super_leaf_network.node_count());
+        let num_super_modules = assignment_module_count(&super_assignment);
+        let trivial_solution =
+            num_super_modules == 1 || num_super_modules == super_leaf_network.nodes.len();
+        let (super_codelength, super_index_codelength) =
+            active_modules_terms(&super_top, &mut super_objective, workspace);
+
+        if trivial_solution {
+            break;
+        }
+
+        if super_codelength >= old_index_length - MIN_CODELENGTH_IMPROVEMENT {
+            break;
+        }
+
+        let mut super_module_members = vec![0u32; super_top.nodes.len()];
+        for &m in &super_assignment {
+            super_module_members[m as usize] += 1;
+        }
+        num_non_trivial_top_modules = super_module_members.iter().filter(|&&n| n > 1).count();
+
+        let mut super_module_data = Vec::with_capacity(super_top.nodes.len());
+        for node in &super_top.nodes {
+            super_module_data.push(node.data);
+        }
+        super_assignments.push(super_assignment.clone());
+        active =
+            super_active.consolidate(&super_assignment, &super_module_data, directed, workspace);
+        refresh_active_data_from_leaf_network(leaf_network, &mut active, directed);
+        old_index_length = super_index_codelength;
+    }
+
+    SuperHierarchySearch {
+        active_top: active,
+        super_assignments,
+    }
+}
+
 fn fine_tune<'g>(
     leaf_network: &ActiveNetwork<'g>,
     top_network: &mut ActiveNetwork<'g>,
@@ -3257,14 +3335,25 @@ fn recursive_partition_bottom_modules<'g>(
                 directed,
                 workspace,
             );
-            let super_result = find_hierarchical_super_modules_fast(
-                &sub_active,
-                &sub_top,
-                &mut sub_objective,
-                rng,
-                workspace,
-                directed,
-            );
+            let super_result = if directed {
+                find_hierarchical_super_modules_fast(
+                    &sub_active,
+                    &sub_top,
+                    &mut sub_objective,
+                    rng,
+                    workspace,
+                    directed,
+                )
+            } else {
+                find_hierarchical_super_modules_full(
+                    &sub_active,
+                    &sub_top,
+                    &mut sub_objective,
+                    rng,
+                    workspace,
+                    directed,
+                )
+            };
             let top_assignment =
                 assignment_from_top_network(&super_result.active_top, sub_active.node_count());
             let num_submodules = assignment_module_count(&top_assignment);
