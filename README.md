@@ -91,7 +91,12 @@ minimap modular_wd.net . --directed --two-level --output tree,clu,ftree --seed 1
   - Directed flow with deterministic power iteration and teleportation behavior matched to Infomap expectations
 - Optimizer:
   - Two-level-only map equation optimization
-  - Array-backed active network/module state
+  - Array-backed active network/module state with dual edge storage:
+    - Borrowed graph CSR at level 0 (no duplicated adjacency copy)
+    - Owned compact arrays after consolidation levels
+  - Per-trial reusable workspace for hot buffers (node order, candidates, redirects, consolidation scratch)
+  - Candidate move scoring reuses precomputed old-module delta context to reduce repeated `plogp` work
+  - Consolidation uses array-native stamp/touched-list aggregation (no hash map in the hot path)
   - Rust-native seeded RNG by default (`SmallRng`)
   - MT19937-compatible seeded RNG when `--parity-rng` is set
   - Parallel trial evaluation with Rayon thread pool (`--threads`)
@@ -106,14 +111,13 @@ Example numbers from local runs on **2026-02-15** (`100k` synthetic edge list, o
 
 | `--num-trials` | Tool/config | Effective workers | Wall time | Peak RSS (KiB) | Top modules | Codelength |
 | ---: | --- | ---: | ---: | ---: | ---: | ---: |
-| 1 | `infomap` (`OMP_NUM_THREADS=1`) | 1 | 4.71 s | 42,800 | 2138 | 4.93197 |
-| 1 | `infomap` (`OMP_NUM_THREADS=12`) | 12 | 1.52 s | 70,880 | 2136 | 4.93218 |
-| 1 | `minimap` | 1 | 0.06 s | 29,984 | 2167 | 4.93144 |
-| 1 | `minimap` | 1 | 0.05 s | 29,280 | 2167 | 4.93144 |
-| 8 | `infomap` (`OMP_NUM_THREADS=1`) | 1 | 35.14 s | 141,456 | 2135 | 4.93177 |
-| 8 | `infomap` (`OMP_NUM_THREADS=12`) | 12 | 11.20 s | 168,608 | 2133 | 4.93187 |
-| 8 | `minimap --threads 1` | 1 | 0.26 s | 35,456 | 2167 | 4.93144 |
-| 8 | `minimap --threads 8` | 8 | 0.12 s | 152,128 | 2167 | 4.93144 |
+| 1 | `infomap` (`OMP_NUM_THREADS=1`) | 1 | 11.37 s | 55,296 | 1630 | 13.4330 |
+| 1 | `infomap` (`OMP_NUM_THREADS=12`) | 12 | 2.43 s | 90,128 | 1639 | 13.4342 |
+| 1 | `minimap` | 1 | 0.17 s | 31,216 | 1598 | 13.4361 |
+| 8 | `infomap` (`OMP_NUM_THREADS=1`) | 1 | 86.38 s | 126,864 | 1630 | 13.4330 |
+| 8 | `infomap` (`OMP_NUM_THREADS=12`) | 12 | 17.48 s | 173,824 | 1630 | 13.4353 |
+| 8 | `minimap --threads 1` | 1 | 1.15 s | 39,120 | 1602 | 13.4339 |
+| 8 | `minimap --threads 8` | 8 | 0.21 s | 113,888 | 1602 | 13.4339 |
 
 Notes:
 
