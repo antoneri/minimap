@@ -78,19 +78,11 @@ impl Mt19937 {
         }
 
         let mut w = 32usize - range.leading_zeros() as usize - 1;
-        let low_mask = if w == 0 {
-            0
-        } else {
-            u32::MAX >> (32 - w)
-        };
+        let low_mask = if w == 0 { 0 } else { u32::MAX >> (32 - w) };
         if (range & low_mask) != 0 {
             w += 1;
         }
-        let mask = if w == 0 {
-            0
-        } else {
-            u32::MAX >> (32 - w)
-        };
+        let mask = if w == 0 { 0 } else { u32::MAX >> (32 - w) };
 
         loop {
             let u = self.next_u32() & mask;

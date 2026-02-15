@@ -9,11 +9,7 @@ pub struct DeltaFlow {
 
 #[inline]
 pub fn plogp(p: f64) -> f64 {
-    if p > 0.0 {
-        p * p.log2()
-    } else {
-        0.0
-    }
+    if p > 0.0 { p * p.log2() } else { 0.0 }
 }
 
 #[derive(Debug, Clone)]
@@ -67,9 +63,11 @@ impl MapEquationObjective {
         }
 
         self.enter_flow_log_enter_flow = plogp(self.enter_flow);
-        self.index_codelength =
-            self.enter_flow_log_enter_flow - self.enter_log_enter - self.exit_network_flow_log_exit_network_flow;
-        self.module_codelength = -self.exit_log_exit + self.flow_log_flow - self.node_flow_log_node_flow;
+        self.index_codelength = self.enter_flow_log_enter_flow
+            - self.enter_log_enter
+            - self.exit_network_flow_log_exit_network_flow;
+        self.module_codelength =
+            -self.exit_log_exit + self.flow_log_flow - self.node_flow_log_node_flow;
         self.codelength = self.index_codelength + self.module_codelength;
     }
 
@@ -86,8 +84,7 @@ impl MapEquationObjective {
         let de_old = old_delta.delta_enter + old_delta.delta_exit;
         let de_new = new_delta.delta_enter + new_delta.delta_exit;
 
-        let delta_enter =
-            plogp(self.enter_flow + de_old - de_new) - self.enter_flow_log_enter_flow;
+        let delta_enter = plogp(self.enter_flow + de_old - de_new) - self.enter_flow_log_enter_flow;
 
         let delta_enter_log_enter = -plogp(module_data[old_m].enter_flow)
             - plogp(module_data[new_m].enter_flow)
@@ -108,7 +105,8 @@ impl MapEquationObjective {
                     + de_old,
             )
             + plogp(
-                module_data[new_m].exit_flow + module_data[new_m].flow
+                module_data[new_m].exit_flow
+                    + module_data[new_m].flow
                     + current.exit_flow
                     + current.flow
                     - de_new,
@@ -155,9 +153,11 @@ impl MapEquationObjective {
             + plogp(module_data[new_m].exit_flow + module_data[new_m].flow);
 
         self.enter_flow_log_enter_flow = plogp(self.enter_flow);
-        self.index_codelength =
-            self.enter_flow_log_enter_flow - self.enter_log_enter - self.exit_network_flow_log_exit_network_flow;
-        self.module_codelength = -self.exit_log_exit + self.flow_log_flow - self.node_flow_log_node_flow;
+        self.index_codelength = self.enter_flow_log_enter_flow
+            - self.enter_log_enter
+            - self.exit_network_flow_log_exit_network_flow;
+        self.module_codelength =
+            -self.exit_log_exit + self.flow_log_flow - self.node_flow_log_node_flow;
         self.codelength = self.index_codelength + self.module_codelength;
     }
 }

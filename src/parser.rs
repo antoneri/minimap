@@ -76,7 +76,10 @@ fn parse_vertex_line(line: &str) -> Result<(u32, Option<String>, f64), String> {
                     .map_err(|_| format!("Can't parse vertex weight from line '{}'", line))?;
             }
             if weight < 0.0 {
-                return Err(format!("Negative node weight ({}) from line '{}'", weight, line));
+                return Err(format!(
+                    "Negative node weight ({}) from line '{}'",
+                    weight, line
+                ));
             }
             return Ok((id, name, weight));
         }
@@ -90,7 +93,10 @@ fn parse_vertex_line(line: &str) -> Result<(u32, Option<String>, f64), String> {
             .parse::<f64>()
             .map_err(|_| format!("Can't parse vertex weight from line '{}'", line))?;
         if weight < 0.0 {
-            return Err(format!("Negative node weight ({}) from line '{}'", weight, line));
+            return Err(format!(
+                "Negative node weight ({}) from line '{}'",
+                weight, line
+            ));
         }
     }
 
@@ -98,16 +104,16 @@ fn parse_vertex_line(line: &str) -> Result<(u32, Option<String>, f64), String> {
 }
 
 pub fn parse_network_file(path: &Path) -> Result<ParsedNetwork, String> {
-    let file = File::open(path)
-        .map_err(|e| format!("Error opening file '{}': {}", path.display(), e))?;
+    let file =
+        File::open(path).map_err(|e| format!("Error opening file '{}': {}", path.display(), e))?;
     let reader = BufReader::new(file);
 
     let mut parsed = ParsedNetwork::default();
     let mut section = Section::Links;
 
     for line_res in reader.lines() {
-        let line = line_res
-            .map_err(|e| format!("Error reading file '{}': {}", path.display(), e))?;
+        let line =
+            line_res.map_err(|e| format!("Error reading file '{}': {}", path.display(), e))?;
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;

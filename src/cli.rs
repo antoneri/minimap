@@ -195,12 +195,10 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
         }
     }
 
-    let network_file = network_file.ok_or_else(|| {
-        "Usage: minimap network_file out_directory [options]".to_string()
-    })?;
-    let out_dir = out_dir.ok_or_else(|| {
-        "Usage: minimap network_file out_directory [options]".to_string()
-    })?;
+    let network_file = network_file
+        .ok_or_else(|| "Usage: minimap network_file out_directory [options]".to_string())?;
+    let out_dir =
+        out_dir.ok_or_else(|| "Usage: minimap network_file out_directory [options]".to_string())?;
 
     let out_name = match out_name {
         Some(v) => v,

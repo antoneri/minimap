@@ -144,7 +144,13 @@ pub fn calculate_flow(graph: &mut Graph, cfg: FlowConfig) {
         }
     }
 
-    finalize(graph, cfg, &node_flow, &node_teleport_weights, &node_out_degree);
+    finalize(
+        graph,
+        cfg,
+        &node_flow,
+        &node_teleport_weights,
+        &node_out_degree,
+    );
 }
 
 fn finalize(
@@ -157,7 +163,11 @@ fn finalize(
     let n = graph.node_count();
 
     for i in 0..n {
-        let tele_w = if cfg.directed { node_teleport_weights[i] } else { 0.0 };
+        let tele_w = if cfg.directed {
+            node_teleport_weights[i]
+        } else {
+            0.0
+        };
         let tele_flow = node_flow[i]
             * if node_out_degree[i] == 0 {
                 1.0
@@ -170,7 +180,11 @@ fn finalize(
         graph.nodes[i].data.teleport_flow = tele_flow;
         graph.nodes[i].data.enter_flow = node_flow[i];
         graph.nodes[i].data.exit_flow = node_flow[i];
-        graph.nodes[i].data.dangling_flow = if node_out_degree[i] == 0 { node_flow[i] } else { 0.0 };
+        graph.nodes[i].data.dangling_flow = if node_out_degree[i] == 0 {
+            node_flow[i]
+        } else {
+            0.0
+        };
 
         graph.nodes[i].data.enter_flow -= tele_flow * tele_w;
         graph.nodes[i].data.exit_flow -= tele_flow * tele_w;

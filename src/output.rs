@@ -130,15 +130,22 @@ fn write_header(
     writeln!(w, "# minimap {}", cfg.raw_args).map_err(|e| e.to_string())?;
     writeln!(w, "# started at {}", started).map_err(|e| e.to_string())?;
     writeln!(w, "# completed in {} s", elapsed.as_secs_f64()).map_err(|e| e.to_string())?;
-    writeln!(w, "# partitioned into 2 levels with {} top modules", top_modules)
-        .map_err(|e| e.to_string())?;
+    writeln!(
+        w,
+        "# partitioned into 2 levels with {} top modules",
+        top_modules
+    )
+    .map_err(|e| e.to_string())?;
     writeln!(w, "# codelength {} bits", fmt_sig(codelength, 6)).map_err(|e| e.to_string())?;
-    writeln!(w, "# relative codelength savings {}%", fmt_sig(rel, 6))
-        .map_err(|e| e.to_string())?;
+    writeln!(w, "# relative codelength savings {}%", fmt_sig(rel, 6)).map_err(|e| e.to_string())?;
     writeln!(
         w,
         "# flow model {}",
-        if cfg.directed { "directed" } else { "undirected" }
+        if cfg.directed {
+            "directed"
+        } else {
+            "undirected"
+        }
     )
     .map_err(|e| e.to_string())?;
     Ok(())
@@ -212,8 +219,14 @@ fn write_clu_file(
         let module_id = module_zero as u32 + 1;
         for &node_idx in nodes {
             let node = &graph.nodes[node_idx];
-            writeln!(w, "{} {} {}", node.id, module_id, fmt_sig(node.data.flow, 6))
-                .map_err(|e| e.to_string())?;
+            writeln!(
+                w,
+                "{} {} {}",
+                node.id,
+                module_id,
+                fmt_sig(node.data.flow, 6)
+            )
+            .map_err(|e| e.to_string())?;
         }
     }
 
@@ -289,7 +302,11 @@ fn write_ftree_file(
     writeln!(
         w,
         "*Links {}",
-        if cfg.directed { "directed" } else { "undirected" }
+        if cfg.directed {
+            "directed"
+        } else {
+            "undirected"
+        }
     )
     .map_err(|e| e.to_string())?;
     writeln!(w, "#*Links path enterFlow exitFlow numEdges numChildren")

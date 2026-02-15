@@ -67,9 +67,10 @@ impl Graph {
 
         let mut nodes = Vec::with_capacity(node_ids.len());
         for id in node_ids.iter().copied() {
-            let v = parsed.vertices.get(&id).ok_or_else(|| {
-                format!("Missing vertex metadata for node {}", id)
-            })?;
+            let v = parsed
+                .vertices
+                .get(&id)
+                .ok_or_else(|| format!("Missing vertex metadata for node {}", id))?;
             nodes.push(NodeRecord {
                 id,
                 name: v.name.clone(),
@@ -92,10 +93,7 @@ impl Graph {
             edges.push((s, t, w));
         }
 
-        edges.sort_unstable_by(|a, b| {
-            a.0.cmp(&b.0)
-                .then(a.1.cmp(&b.1))
-        });
+        edges.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
 
         let m = edges.len();
         let n = nodes.len();

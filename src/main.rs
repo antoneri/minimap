@@ -35,8 +35,7 @@ fn run() -> Result<(), String> {
     if !cfg.silent {
         println!(
             "Partitioned into 2 levels with {} top modules, codelength {}",
-            trial.num_modules,
-            trial.codelength
+            trial.num_modules, trial.codelength
         );
     }
 
