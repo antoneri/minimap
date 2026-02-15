@@ -816,6 +816,7 @@ fn try_move_each_node_into_best_module<A: AdjAccess>(
     dirty: &mut [bool],
     empty_modules: &mut Vec<u32>,
     lock_multi_module_nodes: bool,
+    directed: bool,
     workspace: &mut OptimizeWorkspace,
 ) -> u32 {
     let n = active.nodes.len();
@@ -953,6 +954,11 @@ fn try_move_each_node_into_best_module<A: AdjAccess>(
         let mut strongest_module = current_module;
         let mut strongest_delta = old_delta;
         let mut strongest_delta_codelength = 0.0f64;
+        let mut strongest_strength = if directed {
+            old_delta.delta_exit
+        } else {
+            old_delta.delta_exit + old_delta.delta_enter
+        };
 
         for &enum_idx in module_order.iter() {
             let cidx = enum_idx as usize;
@@ -976,10 +982,16 @@ fn try_move_each_node_into_best_module<A: AdjAccess>(
                 best_delta_codelength = delta;
             }
 
-            if cand_delta.delta_exit > strongest_delta.delta_exit {
+            let cand_strength = if directed {
+                cand_delta.delta_exit
+            } else {
+                cand_delta.delta_exit + cand_delta.delta_enter
+            };
+            if cand_strength > strongest_strength {
                 strongest_module = other_module;
                 strongest_delta = cand_delta;
                 strongest_delta_codelength = delta;
+                strongest_strength = cand_strength;
             }
         }
 
@@ -1089,6 +1101,7 @@ fn optimize_active_network(
     active: &ActiveNetwork<'_>,
     rng: &mut impl TrialRng,
     objective: &mut MapEquationObjective,
+    directed: bool,
     predefined_modules: Option<&[u32]>,
     lock_multi_module_nodes: bool,
     loop_limit: usize,
@@ -1112,6 +1125,7 @@ fn optimize_active_network(
                 &adj,
                 rng,
                 objective,
+                directed,
                 predefined_modules,
                 lock_multi_module_nodes,
                 loop_limit,
@@ -1135,6 +1149,7 @@ fn optimize_active_network(
                 &adj,
                 rng,
                 objective,
+                directed,
                 predefined_modules,
                 lock_multi_module_nodes,
                 loop_limit,
@@ -1149,6 +1164,7 @@ fn optimize_active_network_with_adj<A: AdjAccess>(
     adj: &A,
     rng: &mut impl TrialRng,
     objective: &mut MapEquationObjective,
+    directed: bool,
     predefined_modules: Option<&[u32]>,
     lock_multi_module_nodes: bool,
     loop_limit: usize,
@@ -1210,6 +1226,7 @@ fn optimize_active_network_with_adj<A: AdjAccess>(
             &mut dirty,
             &mut empty_modules,
             lock_multi_module_nodes,
+            directed,
             workspace,
         );
 
@@ -1318,8 +1335,9 @@ fn find_top_modules_repeatedly_from_leaf<'g>(
             CORE_LOOP_LIMIT
         };
         let lock = lock_first_loop && aggregation_level == 0;
-        let level =
-            optimize_active_network(&active, rng, objective, None, lock, loop_limit, workspace);
+        let level = optimize_active_network(
+            &active, rng, objective, directed, None, lock, loop_limit, workspace,
+        );
 
         let next_module_count = assignment_module_count(&level.node_module);
         let allow_non_improving_level =
@@ -1369,8 +1387,9 @@ fn find_top_modules_repeatedly_from_modules<'g>(
         } else {
             CORE_LOOP_LIMIT
         };
-        let level =
-            optimize_active_network(&active, rng, objective, None, false, loop_limit, workspace);
+        let level = optimize_active_network(
+            &active, rng, objective, directed, None, false, loop_limit, workspace,
+        );
 
         let next_module_count = assignment_module_count(&level.node_module);
         let allow_non_improving_level =
@@ -1725,6 +1744,7 @@ fn coarse_tune<'g>(
         &submodule_network,
         rng,
         objective,
+        directed,
         Some(&submodule_to_old_module),
         false,
         CORE_LOOP_LIMIT,
@@ -1985,6 +2005,7 @@ fn fine_tune<'g>(
         leaf_network,
         rng,
         objective,
+        directed,
         Some(&predefined_modules),
         false,
         CORE_LOOP_LIMIT,
