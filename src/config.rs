@@ -7,6 +7,7 @@ pub struct Config {
     pub out_dir: PathBuf,
     pub out_name: String,
     pub directed: bool,
+    pub multilevel: bool,
     pub seed: u32,
     pub num_trials: u32,
     pub trial_threads: Option<usize>,

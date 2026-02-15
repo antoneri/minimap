@@ -16,7 +16,8 @@ This project is based on ideas and output conventions from **Infomap**.
 
 ## Current scope (v1)
 
-- Two-level optimization only
+- Multilevel hierarchy mode by default
+- Optional two-level mode (`--two-level`)
 - Standard network input only (link-list and Pajek `*Vertices`, `*Edges`, `*Arcs`, `*Links`)
 - Output files: `.tree`, `.clu`, `.ftree`
 - Deterministic seeded trials
@@ -50,6 +51,7 @@ minimap network_file out_directory [options]
 Supported options (v1):
 
 - `--directed`
+- `--multilevel`
 - `--two-level`
 - `--seed <u32>`
 - `--num-trials <u32>`
@@ -75,6 +77,11 @@ minimap modular_w.net . --two-level --tree --seed 123 --num-trials 8 --threads 8
 minimap modular_wd.net . --directed --two-level --output tree,clu,ftree --seed 123 --num-trials 8 --threads 8 --silent
 ```
 
+```bash
+# Multilevel hierarchy output
+minimap ninetriangles.net . --multilevel --output tree,clu,ftree --seed 123 --num-trials 1 --silent
+```
+
 ## Implementation overview
 
 `minimap` is implemented with cache-friendly array layouts rather than linked lists.
@@ -93,7 +100,7 @@ minimap modular_wd.net . --directed --two-level --output tree,clu,ftree --seed 1
   - Undirected flow model
   - Directed flow with deterministic power iteration and teleportation behavior matched to Infomap expectations
 - Optimizer:
-  - Two-level-only map equation optimization
+  - Two-level map equation optimization with optional multilevel hierarchy retention (`--multilevel`)
   - Array-backed active network/module state with dual edge storage:
     - Borrowed graph CSR at level 0 (no duplicated adjacency copy)
     - Owned compact arrays after consolidation levels
@@ -107,6 +114,7 @@ minimap modular_wd.net . --directed --two-level --output tree,clu,ftree --seed 1
   - Parallel trial evaluation with Rayon thread pool (`--threads`)
 - Writers:
   - Streaming `.tree`, `.clu`, `.ftree` output
+  - Multilevel path/link serialization when hierarchy mode is enabled
   - Deterministic ordering for stable file generation
   - Header format aligned with Infomap-compatible output style
 

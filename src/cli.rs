@@ -31,6 +31,7 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
     let mut out_dir: Option<PathBuf> = None;
 
     let mut directed = false;
+    let mut multilevel = true;
     let mut seed = 123u32;
     let mut num_trials = 1u32;
     let mut trial_threads: Option<usize> = None;
@@ -92,7 +93,12 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
                 directed = true;
                 i += 1;
             }
+            "--multilevel" => {
+                multilevel = true;
+                i += 1;
+            }
             "--two-level" => {
+                multilevel = false;
                 i += 1;
             }
             "--seed" => {
@@ -220,6 +226,7 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
         out_dir,
         out_name,
         directed,
+        multilevel,
         seed,
         num_trials,
         trial_threads,

@@ -25,6 +25,7 @@ fn run() -> Result<(), String> {
         cfg.seed,
         cfg.num_trials,
         cfg.directed,
+        cfg.multilevel,
         cfg.trial_threads,
         cfg.parity_rng,
     );
@@ -34,8 +35,8 @@ fn run() -> Result<(), String> {
 
     if !cfg.silent {
         println!(
-            "Partitioned into 2 levels with {} top modules, codelength {}",
-            trial.num_modules, trial.codelength
+            "Partitioned into {} levels with {} top modules, codelength {}",
+            trial.levels, trial.num_modules, trial.codelength
         );
     }
 
