@@ -94,6 +94,7 @@ minimap modular_wd.net . --directed --two-level --output tree,clu,ftree --seed 1
   - Array-backed active network/module state with dual edge storage:
     - Borrowed graph CSR at level 0 (no duplicated adjacency copy)
     - Owned compact arrays after consolidation levels
+  - Flat module membership storage (`member_leaf` + per-module spans), replacing per-node member vectors
   - Per-trial reusable workspace for hot buffers (node order, candidates, redirects, consolidation scratch)
   - Candidate move scoring reuses precomputed old-module delta context to reduce repeated `plogp` work
   - Consolidation uses array-native stamp/touched-list aggregation (no hash map in the hot path)

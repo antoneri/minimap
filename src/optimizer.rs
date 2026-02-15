@@ -19,7 +19,7 @@ struct ActiveNode {
     data: FlowData,
     out_span: EdgeSpan,
     in_span: EdgeSpan,
-    members: Vec<u32>,
+    member_span: EdgeSpan,
 }
 
 #[derive(Debug, Clone)]
@@ -41,6 +41,7 @@ enum EdgeStorage<'g> {
 #[derive(Debug, Clone)]
 struct ActiveNetwork<'g> {
     nodes: Vec<ActiveNode>,
+    member_leaf: Vec<u32>,
     edge_storage: EdgeStorage<'g>,
 }
 
@@ -67,6 +68,9 @@ struct OptimizeWorkspace {
     consolidate_module_offsets: Vec<u32>,
     consolidate_module_fill: Vec<u32>,
     consolidate_module_nodes: Vec<u32>,
+    consolidate_member_counts: Vec<u32>,
+    consolidate_member_offsets: Vec<u32>,
+    consolidate_member_fill: Vec<u32>,
     consolidate_dst_stamp: Vec<u32>,
     consolidate_dst_flow: Vec<f64>,
     consolidate_touched_dsts: Vec<u32>,
@@ -102,6 +106,12 @@ impl<'g> ActiveNetwork<'g> {
     #[inline]
     fn in_range(&self, node_idx: usize) -> std::ops::Range<usize> {
         let span = self.nodes[node_idx].in_span;
+        span.start as usize..span.end as usize
+    }
+
+    #[inline]
+    fn member_range(&self, node_idx: usize) -> std::ops::Range<usize> {
+        let span = self.nodes[node_idx].member_span;
         span.start as usize..span.end as usize
     }
 
@@ -172,6 +182,7 @@ impl<'g> ActiveNetwork<'g> {
     fn from_graph(graph: &'g Graph) -> Self {
         let n = graph.node_count();
         let mut nodes = Vec::with_capacity(n);
+        let mut member_leaf = Vec::with_capacity(n);
         for i in 0..n {
             nodes.push(ActiveNode {
                 data: graph.nodes[i].data,
@@ -183,12 +194,17 @@ impl<'g> ActiveNetwork<'g> {
                     start: graph.in_offsets[i],
                     end: graph.in_offsets[i + 1],
                 },
-                members: vec![i as u32],
+                member_span: EdgeSpan {
+                    start: i as u32,
+                    end: (i + 1) as u32,
+                },
             });
+            member_leaf.push(i as u32);
         }
 
         Self {
             nodes,
+            member_leaf,
             edge_storage: EdgeStorage::Borrowed {
                 edge_source: &graph.edge_source,
                 edge_target: &graph.edge_target,
@@ -221,20 +237,12 @@ impl<'g> ActiveNetwork<'g> {
                 data: FlowData::default(),
                 out_span: EdgeSpan::default(),
                 in_span: EdgeSpan::default(),
-                members: Vec::new(),
+                member_span: EdgeSpan::default(),
             })
             .collect();
 
         for (new_m, &old_m) in ordered_old_modules.iter().enumerate() {
             new_nodes[new_m].data = module_data[old_m as usize];
-        }
-
-        for i in 0..n {
-            let old_m = node_module[i] as usize;
-            let new_m = old_to_new[old_m] as usize;
-            new_nodes[new_m]
-                .members
-                .extend_from_slice(&self.nodes[i].members);
         }
 
         let new_n = new_nodes.len();
@@ -243,6 +251,9 @@ impl<'g> ActiveNetwork<'g> {
             consolidate_module_offsets,
             consolidate_module_fill,
             consolidate_module_nodes,
+            consolidate_member_counts,
+            consolidate_member_offsets,
+            consolidate_member_fill,
             consolidate_dst_stamp,
             consolidate_dst_flow,
             consolidate_touched_dsts,
@@ -254,6 +265,42 @@ impl<'g> ActiveNetwork<'g> {
             consolidate_stamp_gen,
             ..
         } = workspace;
+
+        consolidate_member_counts.resize(new_n, 0);
+        consolidate_member_counts.fill(0);
+        for i in 0..n {
+            let new_m = old_to_new[node_module[i] as usize] as usize;
+            let span = self.nodes[i].member_span;
+            consolidate_member_counts[new_m] += span.end - span.start;
+        }
+
+        consolidate_member_offsets.resize(new_n + 1, 0);
+        consolidate_member_offsets[0] = 0;
+        for i in 0..new_n {
+            consolidate_member_offsets[i + 1] =
+                consolidate_member_offsets[i] + consolidate_member_counts[i];
+        }
+
+        consolidate_member_fill.resize(new_n, 0);
+        consolidate_member_fill.fill(0);
+        let total_members = consolidate_member_offsets[new_n] as usize;
+        let mut member_leaf = vec![0u32; total_members];
+        for i in 0..n {
+            let new_m = old_to_new[node_module[i] as usize] as usize;
+            let src_range = self.member_range(i);
+            let len = src_range.len() as u32;
+            let dst_start = consolidate_member_offsets[new_m] + consolidate_member_fill[new_m];
+            let dst_end = dst_start + len;
+            member_leaf[dst_start as usize..dst_end as usize]
+                .copy_from_slice(&self.member_leaf[src_range]);
+            consolidate_member_fill[new_m] += len;
+        }
+        for i in 0..new_n {
+            new_nodes[i].member_span = EdgeSpan {
+                start: consolidate_member_offsets[i],
+                end: consolidate_member_offsets[i + 1],
+            };
+        }
 
         consolidate_module_counts.resize(new_n, 0);
         consolidate_module_counts.fill(0);
@@ -384,6 +431,7 @@ impl<'g> ActiveNetwork<'g> {
 
         Self {
             nodes: new_nodes,
+            member_leaf,
             edge_storage: EdgeStorage::Owned {
                 out_neighbor,
                 out_flow,
@@ -396,7 +444,8 @@ impl<'g> ActiveNetwork<'g> {
     fn assignment_to_leaves(&self, leaf_count: usize) -> Vec<u32> {
         let mut out = vec![0u32; leaf_count];
         for (module_idx, node) in self.nodes.iter().enumerate() {
-            for &leaf in &node.members {
+            for p in node.member_span.start as usize..node.member_span.end as usize {
+                let leaf = self.member_leaf[p];
                 out[leaf as usize] = module_idx as u32;
             }
         }
@@ -1023,14 +1072,14 @@ fn fine_tune<'g>(
 fn flatten_active_to_assignment(active: &ActiveNetwork<'_>) -> (Vec<u32>, u32) {
     let mut max_member = 0usize;
     for n in &active.nodes {
-        for &m in &n.members {
-            max_member = max_member.max(m as usize);
+        for p in n.member_span.start as usize..n.member_span.end as usize {
+            max_member = max_member.max(active.member_leaf[p] as usize);
         }
     }
     let mut out = vec![0u32; max_member + 1];
     for (module_idx, n) in active.nodes.iter().enumerate() {
-        for &m in &n.members {
-            out[m as usize] = module_idx as u32;
+        for p in n.member_span.start as usize..n.member_span.end as usize {
+            out[active.member_leaf[p] as usize] = module_idx as u32;
         }
     }
     (out, active.nodes.len() as u32)
