@@ -45,6 +45,13 @@ pub struct MapEquationObjective {
 
 impl MapEquationObjective {
     pub fn new(node_data: &[FlowData]) -> Self {
+        Self::from_flowdata_iter(node_data.iter())
+    }
+
+    pub fn from_flowdata_iter<'a, I>(node_data: I) -> Self
+    where
+        I: IntoIterator<Item = &'a FlowData>,
+    {
         let mut node_flow_log_node_flow = 0.0;
         for n in node_data {
             node_flow_log_node_flow += plogp(n.flow);

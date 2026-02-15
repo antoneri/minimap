@@ -14,6 +14,16 @@ fn trace_super_enabled() -> bool {
 }
 
 #[inline]
+fn trace_split_enabled() -> bool {
+    std::env::var_os("MINIMAP_TRACE_SPLIT").is_some()
+}
+
+#[inline]
+fn is_strict_codelength_improvement(old_value: f64, new_value: f64) -> bool {
+    new_value < old_value - MIN_CODELENGTH_IMPROVEMENT
+}
+
+#[inline]
 fn super_validation_limit() -> usize {
     if std::env::var_os("MINIMAP_VALIDATE_SUPER").is_none() {
         return 0;
@@ -1733,11 +1743,8 @@ fn coarse_tune<'g>(
         }
 
         let sub_active = induced_subnetwork(leaf_network, members, workspace);
-        let mut sub_node_data = Vec::with_capacity(sub_active.nodes.len());
-        for node in &sub_active.nodes {
-            sub_node_data.push(node.data);
-        }
-        let mut sub_objective = MapEquationObjective::new(&sub_node_data);
+        let mut sub_objective =
+            MapEquationObjective::from_flowdata_iter(sub_active.nodes.iter().map(|n| &n.data));
         let sub_top = find_top_modules_repeatedly_from_leaf(
             &sub_active,
             &mut sub_objective,
@@ -1927,11 +1934,8 @@ fn validate_super_decision_against_slow<'g>(
     let mut ref_rng = Mt19937::new(seed);
     let mut ref_workspace = OptimizeWorkspace::default();
 
-    let mut ref_node_data = Vec::with_capacity(super_leaf_network.nodes.len());
-    for node in &super_leaf_network.nodes {
-        ref_node_data.push(node.data);
-    }
-    let mut ref_objective = MapEquationObjective::new(&ref_node_data);
+    let mut ref_objective =
+        MapEquationObjective::from_flowdata_iter(super_leaf_network.nodes.iter().map(|n| &n.data));
     let ref_one_level =
         active_modules_codelength(super_leaf_network, &mut ref_objective, &mut ref_workspace);
     let ref_top = optimize_two_level_from_leaf(
@@ -1997,12 +2001,9 @@ fn find_hierarchical_super_modules_fast<'g>(
         let mut super_active = active.clone();
         transform_node_flow_to_enter_flow(&mut super_active);
         let super_leaf_network = super_active.with_compact_members();
-        workspace.flow_data.clear();
-        workspace.flow_data.reserve(super_active.nodes.len());
-        for node in &super_leaf_network.nodes {
-            workspace.flow_data.push(node.data);
-        }
-        let mut super_objective = MapEquationObjective::new(&workspace.flow_data);
+        let mut super_objective = MapEquationObjective::from_flowdata_iter(
+            super_leaf_network.nodes.iter().map(|n| &n.data),
+        );
 
         let level = optimize_active_network(
             &super_leaf_network,
@@ -2128,12 +2129,9 @@ fn find_hierarchical_super_modules_full<'g>(
         let mut super_active = active.clone();
         transform_node_flow_to_enter_flow(&mut super_active);
         let super_leaf_network = super_active.with_compact_members();
-        workspace.flow_data.clear();
-        workspace.flow_data.reserve(super_active.nodes.len());
-        for node in &super_leaf_network.nodes {
-            workspace.flow_data.push(node.data);
-        }
-        let mut super_objective = MapEquationObjective::new(&workspace.flow_data);
+        let mut super_objective = MapEquationObjective::from_flowdata_iter(
+            super_leaf_network.nodes.iter().map(|n| &n.data),
+        );
 
         let super_one_level_codelength =
             active_modules_codelength(&super_leaf_network, &mut super_objective, workspace);
@@ -2143,8 +2141,8 @@ fn find_hierarchical_super_modules_full<'g>(
             rng,
             directed,
             super_one_level_codelength,
-            directed,
-            directed,
+            true,
+            false,
             workspace,
         );
 
@@ -2523,6 +2521,17 @@ fn module_term_codelength_graph(graph: &Graph, hier: &HierarchyResult, module_id
     }
     let exit = hier.module_data[module_idx].exit_flow;
     plogp(exit + child_total) - plogp(exit) - child_log
+}
+
+#[inline]
+fn module_depth_from_parent(module_parent: &[u32], module_idx: u32) -> u32 {
+    let mut depth = 1u32;
+    let mut cur = module_idx;
+    while module_parent[cur as usize] != u32::MAX {
+        depth += 1;
+        cur = module_parent[cur as usize];
+    }
+    depth
 }
 
 #[inline]
@@ -3313,6 +3322,7 @@ fn recursive_partition_bottom_modules<'g>(
         }
     }
 
+    let trace_split = trace_split_enabled();
     let mut validate_remaining = split_term_validation_limit();
 
     while !workspace.recurse_queue.is_empty() {
@@ -3335,6 +3345,13 @@ fn recursive_partition_bottom_modules<'g>(
                 .recurse_module_children
                 .extend_from_slice(hierarchy.children_slice(module_idx));
             if workspace.recurse_module_children.len() <= 2 {
+                if trace_split {
+                    eprintln!(
+                        "[split] module={} reject=small size={}",
+                        module_idx,
+                        workspace.recurse_module_children.len()
+                    );
+                }
                 continue;
             }
             let parent_members = workspace.recurse_module_children.clone();
@@ -3344,18 +3361,24 @@ fn recursive_partition_bottom_modules<'g>(
             }
             let old_module_codelength =
                 module_term_codelength_graph(graph, &snapshot, module_idx as usize);
+            let module_depth = module_depth_from_parent(&snapshot.module_parent, module_idx);
+            let module_size = parent_members.len();
 
             let sub_active = induced_subnetwork(leaf_network, &parent_members, workspace);
             if sub_active.node_count() <= 2 {
+                if trace_split {
+                    eprintln!(
+                        "[split] module={} depth={} reject=small_subnetwork size={}",
+                        module_idx,
+                        module_depth,
+                        sub_active.node_count()
+                    );
+                }
                 continue;
             }
 
-            workspace.flow_data.clear();
-            workspace.flow_data.reserve(sub_active.nodes.len());
-            for node in &sub_active.nodes {
-                workspace.flow_data.push(node.data);
-            }
-            let mut sub_objective = MapEquationObjective::new(&workspace.flow_data);
+            let mut sub_objective =
+                MapEquationObjective::from_flowdata_iter(sub_active.nodes.iter().map(|n| &n.data));
             let sub_one_level = active_one_level_codelength(&sub_active);
             let sub_top = optimize_two_level_from_leaf(
                 &sub_active,
@@ -3363,8 +3386,8 @@ fn recursive_partition_bottom_modules<'g>(
                 rng,
                 directed,
                 sub_one_level,
-                directed,
-                directed,
+                true,
+                false,
                 workspace,
             );
             let super_result = if directed {
@@ -3392,6 +3415,12 @@ fn recursive_partition_bottom_modules<'g>(
             let trivial_sub_partition =
                 num_submodules <= 1 || num_submodules == parent_members.len();
             if trivial_sub_partition {
+                if trace_split {
+                    eprintln!(
+                        "[split] module={} depth={} size={} reject=trivial submodules={}",
+                        module_idx, module_depth, module_size, num_submodules
+                    );
+                }
                 continue;
             }
 
@@ -3425,7 +3454,37 @@ fn recursive_partition_bottom_modules<'g>(
                 );
                 validate_remaining -= 1;
             }
-            if new_local_codelength >= old_module_codelength - MIN_CODELENGTH_IMPROVEMENT {
+            if !new_local_codelength.is_finite() {
+                if trace_split {
+                    eprintln!(
+                        "[split] module={} depth={} size={} old_local={} new_local={} delta=NaN eps={} accept=false reject=non_finite",
+                        module_idx,
+                        module_depth,
+                        module_size,
+                        old_module_codelength,
+                        new_local_codelength,
+                        MIN_CODELENGTH_IMPROVEMENT
+                    );
+                }
+                continue;
+            }
+            let local_delta = old_module_codelength - new_local_codelength;
+            let accept =
+                is_strict_codelength_improvement(old_module_codelength, new_local_codelength);
+            if trace_split {
+                eprintln!(
+                    "[split] module={} depth={} size={} old_local={} new_local={} delta={} eps={} accept={}",
+                    module_idx,
+                    module_depth,
+                    module_size,
+                    old_module_codelength,
+                    new_local_codelength,
+                    local_delta,
+                    MIN_CODELENGTH_IMPROVEMENT,
+                    accept
+                );
+            }
+            if !accept {
                 continue;
             }
 
@@ -3440,6 +3499,15 @@ fn recursive_partition_bottom_modules<'g>(
             workspace
                 .recurse_next_queue
                 .extend(workspace.recurse_next_level_leaf_modules.iter().copied());
+            if trace_split {
+                eprintln!(
+                    "[split] module={} depth={} action=accept children_added={} next_queue_added={}",
+                    module_idx,
+                    module_depth,
+                    sub_hierarchy.top_modules.len(),
+                    workspace.recurse_next_level_leaf_modules.len()
+                );
+            }
         }
 
         std::mem::swap(
@@ -3455,8 +3523,7 @@ fn single_trial(
     directed: bool,
     multilevel: bool,
 ) -> TrialResult {
-    let node_data = graph.node_data.clone();
-    let mut objective = MapEquationObjective::new(&node_data);
+    let mut objective = MapEquationObjective::new(&graph.node_data);
     let mut workspace = OptimizeWorkspace::default();
 
     let leaf_network = ActiveNetwork::from_graph(graph);
@@ -3483,14 +3550,25 @@ fn single_trial(
     let mut super_assignments: Vec<Vec<u32>> = Vec::new();
 
     if multilevel {
-        let super_result = find_hierarchical_super_modules_fast(
-            &leaf_network,
-            &top_network,
-            &mut objective,
-            rng,
-            &mut workspace,
-            directed,
-        );
+        let super_result = if directed {
+            find_hierarchical_super_modules_fast(
+                &leaf_network,
+                &top_network,
+                &mut objective,
+                rng,
+                &mut workspace,
+                directed,
+            )
+        } else {
+            find_hierarchical_super_modules_full(
+                &leaf_network,
+                &top_network,
+                &mut objective,
+                rng,
+                &mut workspace,
+                directed,
+            )
+        };
         super_assignments = super_result.super_assignments;
         top_network = super_result.active_top;
     }
@@ -3533,7 +3611,7 @@ fn single_trial(
     let codelength = if let Some(hier) = hierarchy.as_ref() {
         hierarchy_codelength(graph, hier)
     } else {
-        let mut final_obj = MapEquationObjective::new(&node_data);
+        let mut final_obj = MapEquationObjective::new(&graph.node_data);
         let module_indices: Vec<u32> = (0..num_modules).collect();
         final_obj.init_partition(&module_data, &module_indices);
         final_obj.codelength
