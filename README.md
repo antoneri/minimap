@@ -120,6 +120,8 @@ minimap ninetriangles.net . --multilevel --output tree,clu,ftree --seed 123 --nu
 
 ## Benchmark examples
 
+Benchmark harness policy: Infomap runs use `OMP_NUM_THREADS=12`.
+
 Example numbers from local runs on **2026-02-15** (`100k` synthetic edge list, one run per point, Infomap built with OpenMP and run with `--inner-parallelization`):
 
 | `--num-trials` | Tool/config | Effective workers | Wall time | Peak RSS (KiB) | Top modules | Codelength |

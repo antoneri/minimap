@@ -13,6 +13,66 @@ fn trace_super_enabled() -> bool {
     std::env::var_os("MINIMAP_TRACE_SUPER").is_some()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SuperSearchMode {
+    Fast,
+    Full,
+    Hybrid,
+}
+
+impl SuperSearchMode {
+    #[inline]
+    fn from_env_value(value: &str) -> Option<Self> {
+        match value {
+            "fast" => Some(Self::Fast),
+            "full" => Some(Self::Full),
+            "hybrid" => Some(Self::Hybrid),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    fn use_fast_for(self, directed: bool) -> bool {
+        match self {
+            Self::Fast => true,
+            Self::Full => false,
+            Self::Hybrid => directed,
+        }
+    }
+
+    #[inline]
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Fast => "fast",
+            Self::Full => "full",
+            Self::Hybrid => "hybrid",
+        }
+    }
+}
+
+#[inline]
+fn super_mode_from_env_var(var_name: &str) -> Option<SuperSearchMode> {
+    std::env::var(var_name)
+        .ok()
+        .and_then(|s| SuperSearchMode::from_env_value(s.trim()))
+}
+
+#[inline]
+fn super_mode_top() -> SuperSearchMode {
+    super_mode_from_env_var("MINIMAP_SUPER_TOP_MODE")
+        .or_else(|| super_mode_from_env_var("MINIMAP_SUPER_MODE"))
+        // Best observed parity across undirected multilevel seeds uses fast
+        // top-level super search with full recursive splits.
+        .unwrap_or(SuperSearchMode::Fast)
+}
+
+#[inline]
+fn super_mode_recurse() -> SuperSearchMode {
+    super_mode_from_env_var("MINIMAP_SUPER_RECURSE_MODE")
+        .or_else(|| super_mode_from_env_var("MINIMAP_SUPER_MODE"))
+        .unwrap_or(SuperSearchMode::Hybrid)
+}
+
 #[inline]
 fn trace_split_enabled() -> bool {
     std::env::var_os("MINIMAP_TRACE_SPLIT").is_some()
@@ -1980,6 +2040,36 @@ struct SuperHierarchySearch<'g> {
     super_assignments: Vec<Vec<u32>>,
 }
 
+fn find_hierarchical_super_modules_by_mode<'g>(
+    leaf_network: &ActiveNetwork<'g>,
+    active_top: &ActiveNetwork<'g>,
+    objective: &mut MapEquationObjective,
+    rng: &mut impl TrialRng,
+    workspace: &mut OptimizeWorkspace,
+    directed: bool,
+    mode: SuperSearchMode,
+) -> SuperHierarchySearch<'g> {
+    if mode.use_fast_for(directed) {
+        find_hierarchical_super_modules_fast(
+            leaf_network,
+            active_top,
+            objective,
+            rng,
+            workspace,
+            directed,
+        )
+    } else {
+        find_hierarchical_super_modules_full(
+            leaf_network,
+            active_top,
+            objective,
+            rng,
+            workspace,
+            directed,
+        )
+    }
+}
+
 fn find_hierarchical_super_modules_fast<'g>(
     leaf_network: &ActiveNetwork<'g>,
     active_top: &ActiveNetwork<'g>,
@@ -2154,11 +2244,28 @@ fn find_hierarchical_super_modules_full<'g>(
         let (super_codelength, super_index_codelength) =
             active_modules_terms(&super_top, &mut super_objective, workspace);
 
+        if trace_super_enabled() {
+            eprintln!(
+                "[super-full] candidates={} super_modules={} codelength={} old_index={} index={}",
+                super_active.nodes.len(),
+                num_super_modules,
+                super_codelength,
+                old_index_length,
+                super_index_codelength
+            );
+        }
+
         if trivial_solution {
+            if trace_super_enabled() {
+                eprintln!("[super-full] reject=trivial");
+            }
             break;
         }
 
         if super_codelength >= old_index_length - MIN_CODELENGTH_IMPROVEMENT {
+            if trace_super_enabled() {
+                eprintln!("[super-full] reject=no_super_improvement");
+            }
             break;
         }
 
@@ -2173,6 +2280,12 @@ fn find_hierarchical_super_modules_full<'g>(
             super_module_data.push(node.data);
         }
         super_assignments.push(super_assignment.clone());
+        if trace_super_enabled() {
+            eprintln!(
+                "[super-full] accept non_trivial_modules={}",
+                num_non_trivial_top_modules
+            );
+        }
         active =
             super_active.consolidate(&super_assignment, &super_module_data, directed, workspace);
         refresh_active_data_from_leaf_network(leaf_network, &mut active, directed);
@@ -3323,6 +3436,14 @@ fn recursive_partition_bottom_modules<'g>(
     }
 
     let trace_split = trace_split_enabled();
+    let recurse_super_mode = super_mode_recurse();
+    if trace_super_enabled() {
+        eprintln!(
+            "[split] recurse_super_mode={} directed={}",
+            recurse_super_mode.as_str(),
+            directed
+        );
+    }
     let mut validate_remaining = split_term_validation_limit();
 
     while !workspace.recurse_queue.is_empty() {
@@ -3390,25 +3511,15 @@ fn recursive_partition_bottom_modules<'g>(
                 false,
                 workspace,
             );
-            let super_result = if directed {
-                find_hierarchical_super_modules_fast(
-                    &sub_active,
-                    &sub_top,
-                    &mut sub_objective,
-                    rng,
-                    workspace,
-                    directed,
-                )
-            } else {
-                find_hierarchical_super_modules_full(
-                    &sub_active,
-                    &sub_top,
-                    &mut sub_objective,
-                    rng,
-                    workspace,
-                    directed,
-                )
-            };
+            let super_result = find_hierarchical_super_modules_by_mode(
+                &sub_active,
+                &sub_top,
+                &mut sub_objective,
+                rng,
+                workspace,
+                directed,
+                recurse_super_mode,
+            );
             let top_assignment =
                 assignment_from_top_network(&super_result.active_top, sub_active.node_count());
             let num_submodules = assignment_module_count(&top_assignment);
@@ -3550,25 +3661,23 @@ fn single_trial(
     let mut super_assignments: Vec<Vec<u32>> = Vec::new();
 
     if multilevel {
-        let super_result = if directed {
-            find_hierarchical_super_modules_fast(
-                &leaf_network,
-                &top_network,
-                &mut objective,
-                rng,
-                &mut workspace,
-                directed,
-            )
-        } else {
-            find_hierarchical_super_modules_full(
-                &leaf_network,
-                &top_network,
-                &mut objective,
-                rng,
-                &mut workspace,
-                directed,
-            )
-        };
+        let top_super_mode = super_mode_top();
+        if trace_super_enabled() {
+            eprintln!(
+                "[super] top_super_mode={} directed={}",
+                top_super_mode.as_str(),
+                directed
+            );
+        }
+        let super_result = find_hierarchical_super_modules_by_mode(
+            &leaf_network,
+            &top_network,
+            &mut objective,
+            rng,
+            &mut workspace,
+            directed,
+            top_super_mode,
+        );
         super_assignments = super_result.super_assignments;
         top_network = super_result.active_top;
     }

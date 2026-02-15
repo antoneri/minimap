@@ -10,6 +10,8 @@ import tempfile
 import time
 from pathlib import Path
 
+INFOMAP_OMP_THREADS = "12"
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -243,7 +245,7 @@ def run_once(
                 cmd.append("--two-level")
             cmd.extend(["--tree", str(network), str(out_dir)])
             env = dict(os.environ)
-            env["OMP_NUM_THREADS"] = "1"
+            env["OMP_NUM_THREADS"] = INFOMAP_OMP_THREADS
         else:
             cmd = [str(minimap), str(network), str(out_dir)]
             if directed:
