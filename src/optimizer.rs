@@ -189,6 +189,8 @@ struct OptimizeWorkspace {
     recurse_sub_out_counts: Vec<u32>,
     recurse_sub_in_counts: Vec<u32>,
     recurse_sub_in_fill: Vec<u32>,
+    recurse_split_boundary_out: Vec<f64>,
+    recurse_split_boundary_in: Vec<f64>,
     // Reused by fast super-level search.
     super_old_to_new: Vec<u32>,
     super_layer_assignment: Vec<u32>,
@@ -2638,6 +2640,8 @@ fn candidate_split_local_codelength_with_adj<A: AdjAccess>(
         recurse_sub_global_to_local,
         recurse_sub_touched_global,
         recurse_local_module_data,
+        recurse_split_boundary_out,
+        recurse_split_boundary_in,
         ..
     } = workspace;
 
@@ -2649,6 +2653,16 @@ fn candidate_split_local_codelength_with_adj<A: AdjAccess>(
         recurse_sub_global_to_local[global_leaf_u32 as usize] = local_leaf as u32;
         recurse_sub_touched_global.push(global_leaf_u32);
     }
+
+    let local_leaf_count = parent_members.len();
+    if recurse_split_boundary_out.len() < local_leaf_count {
+        recurse_split_boundary_out.resize(local_leaf_count, 0.0);
+    }
+    if recurse_split_boundary_in.len() < local_leaf_count {
+        recurse_split_boundary_in.resize(local_leaf_count, 0.0);
+    }
+    recurse_split_boundary_out[..local_leaf_count].fill(0.0);
+    recurse_split_boundary_in[..local_leaf_count].fill(0.0);
 
     recurse_local_module_data.clear();
     recurse_local_module_data.extend_from_slice(&sub_hierarchy.module_data);
@@ -2695,16 +2709,9 @@ fn candidate_split_local_codelength_with_adj<A: AdjAccess>(
                     }
                 }
             } else if directed {
-                for &m in ps {
-                    recurse_local_module_data[m as usize].exit_flow += f;
-                }
+                recurse_split_boundary_out[local_s] += f;
             } else {
-                let h = f / 2.0;
-                for &m in ps {
-                    let md = &mut recurse_local_module_data[m as usize];
-                    md.exit_flow += h;
-                    md.enter_flow += h;
-                }
+                recurse_split_boundary_out[local_s] += f / 2.0;
             }
         }
     }
@@ -2725,16 +2732,41 @@ fn candidate_split_local_codelength_with_adj<A: AdjAccess>(
             }
             let f = adj.in_flow(e);
             if directed {
-                for &m in pt {
-                    recurse_local_module_data[m as usize].enter_flow += f;
-                }
+                recurse_split_boundary_in[local_t] += f;
             } else {
-                let h = f / 2.0;
-                for &m in pt {
-                    let md = &mut recurse_local_module_data[m as usize];
-                    md.exit_flow += h;
-                    md.enter_flow += h;
+                recurse_split_boundary_in[local_t] += f / 2.0;
+            }
+        }
+    }
+
+    if directed {
+        for local_leaf in 0..local_leaf_count {
+            let ps = &sub_hierarchy.leaf_paths[local_leaf];
+            let out_sum = recurse_split_boundary_out[local_leaf];
+            if out_sum != 0.0 {
+                for &m in ps {
+                    recurse_local_module_data[m as usize].exit_flow += out_sum;
                 }
+            }
+            let in_sum = recurse_split_boundary_in[local_leaf];
+            if in_sum != 0.0 {
+                for &m in ps {
+                    recurse_local_module_data[m as usize].enter_flow += in_sum;
+                }
+            }
+        }
+    } else {
+        for local_leaf in 0..local_leaf_count {
+            let ps = &sub_hierarchy.leaf_paths[local_leaf];
+            let half_sum =
+                recurse_split_boundary_out[local_leaf] + recurse_split_boundary_in[local_leaf];
+            if half_sum == 0.0 {
+                continue;
+            }
+            for &m in ps {
+                let md = &mut recurse_local_module_data[m as usize];
+                md.exit_flow += half_sum;
+                md.enter_flow += half_sum;
             }
         }
     }

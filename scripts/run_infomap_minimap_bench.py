@@ -42,7 +42,64 @@ def parse_args() -> argparse.Namespace:
         default=123,
         help="Seed used for generators and tool runs.",
     )
+    parser.add_argument(
+        "--strict-parity",
+        action="store_true",
+        help="Fail with non-zero exit code if parity matrix exceeds thresholds.",
+    )
+    parser.add_argument(
+        "--parity-seeds",
+        default="123,777,2024",
+        help="Comma-separated seeds for strict 4-mode parity checks.",
+    )
+    parser.add_argument(
+        "--parity-threshold-two-level",
+        type=float,
+        default=1e-9,
+        help="Max allowed |codelength delta| for two-level parity checks.",
+    )
+    parser.add_argument(
+        "--parity-threshold-multilevel",
+        type=float,
+        default=2e-3,
+        help="Max allowed |codelength delta| for multilevel parity checks.",
+    )
+    parser.add_argument(
+        "--parity-two-level-u-net",
+        default="/Users/anton/kod/infomap/examples/networks/modular_w.net",
+        help="Network for two-level undirected parity checks.",
+    )
+    parser.add_argument(
+        "--parity-two-level-d-net",
+        default="/Users/anton/kod/infomap/examples/networks/modular_wd.net",
+        help="Network for two-level directed parity checks.",
+    )
+    parser.add_argument(
+        "--parity-multilevel-u-net",
+        default="/tmp/minimap_hier_u.net",
+        help="Network for multilevel undirected parity checks.",
+    )
+    parser.add_argument(
+        "--parity-multilevel-d-net",
+        default="/tmp/minimap_hier_d.net",
+        help="Network for multilevel directed parity checks.",
+    )
     return parser.parse_args()
+
+
+def parse_seed_list(seed_csv: str) -> list[int]:
+    seeds: list[int] = []
+    for token in seed_csv.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            seeds.append(int(token))
+        except ValueError as exc:
+            raise ValueError(f"Invalid seed value '{token}' in --parity-seeds") from exc
+    if not seeds:
+        raise ValueError("No valid seeds provided in --parity-seeds")
+    return seeds
 
 
 def generate_perf_100k(path: Path, seed: int) -> None:
@@ -167,6 +224,7 @@ def run_once(
     directed: bool,
     two_level: bool,
     seed: int,
+    minimap_extra_flags: list[str] | None = None,
 ) -> dict:
     with tempfile.TemporaryDirectory(prefix=f"bench_{tool}_") as tmp:
         out_dir = Path(tmp)
@@ -203,6 +261,8 @@ def run_once(
                     "--silent",
                 ]
             )
+            if minimap_extra_flags:
+                cmd.extend(minimap_extra_flags)
             env = None
 
         timed_cmd = ["/usr/bin/time", "-lp"] + cmd
@@ -264,6 +324,91 @@ def run_case(
     return outputs
 
 
+def run_parity_matrix(
+    infomap: Path,
+    minimap: Path,
+    two_level_u_net: Path,
+    two_level_d_net: Path,
+    multilevel_u_net: Path,
+    multilevel_d_net: Path,
+    seeds: list[int],
+    threshold_two_level: float,
+    threshold_multilevel: float,
+) -> dict:
+    modes = [
+        ("two-level", False, True, two_level_u_net, threshold_two_level),
+        ("multilevel", False, False, multilevel_u_net, threshold_multilevel),
+        ("two-level", True, True, two_level_d_net, threshold_two_level),
+        ("multilevel", True, False, multilevel_d_net, threshold_multilevel),
+    ]
+
+    groups = []
+    overall_pass = True
+
+    for mode_name, directed, two_level, network, threshold in modes:
+        per_seed = []
+        deltas = []
+        for seed in seeds:
+            infomap_run = run_once(
+                "infomap",
+                infomap,
+                minimap,
+                network,
+                directed,
+                two_level,
+                seed,
+            )
+            minimap_run = run_once(
+                "minimap",
+                infomap,
+                minimap,
+                network,
+                directed,
+                two_level,
+                seed,
+                minimap_extra_flags=["--parity-rng"],
+            )
+            delta = minimap_run["codelength"] - infomap_run["codelength"]
+            deltas.append(delta)
+            per_seed.append(
+                {
+                    "seed": seed,
+                    "infomap_codelength": infomap_run["codelength"],
+                    "minimap_codelength": minimap_run["codelength"],
+                    "delta": delta,
+                    "infomap_shape": infomap_run["shape"],
+                    "minimap_shape": minimap_run["shape"],
+                    "infomap_depth": infomap_run["depth"],
+                    "minimap_depth": minimap_run["depth"],
+                }
+            )
+
+        max_abs_delta = max(abs(d) for d in deltas)
+        mean_abs_delta = statistics.mean(abs(d) for d in deltas)
+        passed = max_abs_delta <= threshold
+        overall_pass = overall_pass and passed
+        groups.append(
+            {
+                "mode": mode_name,
+                "directed": directed,
+                "network": str(network),
+                "threshold": threshold,
+                "max_abs_delta": max_abs_delta,
+                "mean_abs_delta": mean_abs_delta,
+                "passed": passed,
+                "per_seed": per_seed,
+            }
+        )
+
+    return {
+        "seeds": seeds,
+        "threshold_two_level": threshold_two_level,
+        "threshold_multilevel": threshold_multilevel,
+        "passed": overall_pass,
+        "groups": groups,
+    }
+
+
 def main() -> None:
     args = parse_args()
 
@@ -287,6 +432,35 @@ def main() -> None:
     if not hier_d.exists():
         hier_d = out_dir / "hier_d_2048.net"
         generate_hierarchical(hier_d, args.seed, directed=True)
+
+    parity_two_level_u = Path(args.parity_two_level_u_net)
+    parity_two_level_d = Path(args.parity_two_level_d_net)
+    parity_multilevel_u = Path(args.parity_multilevel_u_net)
+    parity_multilevel_d = Path(args.parity_multilevel_d_net)
+
+    if not parity_two_level_u.exists():
+        parity_two_level_u = hier_u
+    if not parity_two_level_d.exists():
+        parity_two_level_d = hier_d
+    if not parity_multilevel_u.exists():
+        parity_multilevel_u = hier_u
+    if not parity_multilevel_d.exists():
+        parity_multilevel_d = hier_d
+
+    parity_seeds = parse_seed_list(args.parity_seeds)
+    parity_matrix = run_parity_matrix(
+        infomap=infomap,
+        minimap=minimap,
+        two_level_u_net=parity_two_level_u,
+        two_level_d_net=parity_two_level_d,
+        multilevel_u_net=parity_multilevel_u,
+        multilevel_d_net=parity_multilevel_d,
+        seeds=parity_seeds,
+        threshold_two_level=args.parity_threshold_two_level,
+        threshold_multilevel=args.parity_threshold_multilevel,
+    )
+    parity_path = out_dir / "parity_matrix.json"
+    parity_path.write_text(json.dumps(parity_matrix, indent=2))
 
     cases = [
         ("perf100k", perf_net, False, True, args.perf_reps),
@@ -317,6 +491,15 @@ def main() -> None:
     summary_path.write_text(json.dumps(results, indent=2))
 
     print(f"Wrote benchmark summary: {summary_path}")
+    print(f"Wrote parity matrix: {parity_path}")
+    print()
+    print("parity_mode, directed, max_abs_delta, threshold, passed")
+    for group in parity_matrix["groups"]:
+        print(
+            f"{group['mode']}, {group['directed']}, "
+            f"{group['max_abs_delta']:.12f}, {group['threshold']:.12f}, {group['passed']}"
+        )
+    print(f"parity_overall_passed={parity_matrix['passed']}")
     print()
     print(
         "case, mode, directed, tool, codelength, shape, depth, median_wall_s, median_peak_rss_kib"
@@ -335,6 +518,10 @@ def main() -> None:
             f"time_ratio={d['wall_time_ratio_minimap_over_infomap']:.3f}, "
             f"rss_ratio={d['rss_ratio_minimap_over_infomap']:.3f}"
         )
+
+    if args.strict_parity and not parity_matrix["passed"]:
+        print("STRICT PARITY CHECK FAILED")
+        raise SystemExit(2)
 
 
 if __name__ == "__main__":
